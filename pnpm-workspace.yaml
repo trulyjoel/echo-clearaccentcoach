@@ -2,6 +2,7 @@ packages:
   - "apps/*"
   - "packages/*"
 allowBuilds:
+  '@clerk/shared': false
   esbuild: true
 minimumReleaseAgeExclude:
   - '@oxfmt/binding-android-arm-eabi@0.59.0'
@@ -44,3 +45,5 @@ minimumReleaseAgeExclude:
   - '@oxlint/binding-win32-x64-msvc@1.74.0'
   - oxfmt@0.59.0
   - oxlint@1.74.0
+  - '@clerk/react@6.12.5'
+  - '@clerk/shared@4.25.5'

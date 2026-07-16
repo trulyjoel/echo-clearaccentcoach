@@ -14,6 +14,10 @@ Requires Node 22+ and pnpm.
 
 ```sh
 pnpm install
+cp apps/server/.env.example apps/server/.env
+cp apps/web/.env.example apps/web/.env
+# then fill in CLERK_SECRET_KEY / CLERK_PUBLISHABLE_KEY / VITE_CLERK_PUBLISHABLE_KEY
+# from a Clerk app with Password disabled and Email verification link enabled
 pnpm dev          # runs the server (http://localhost:3000) and web app (http://localhost:5173) together
 ```
 

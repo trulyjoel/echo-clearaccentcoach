@@ -13,6 +13,8 @@
   },
   "dependencies": {
     "@callie/types": "workspace:*",
+    "@clerk/fastify": "3.1.52",
+    "@fastify/cors": "11.3.0",
     "fastify": "5.10.0"
   },
   "devDependencies": {
