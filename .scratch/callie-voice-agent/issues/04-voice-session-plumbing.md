@@ -56,3 +56,15 @@ Status set to `ready-for-human` rather than `ready-for-agent`: `DEEPGRAM_API_KEY
 provisioned (see `apps/server/.env.example`) and the flow manually verified against the real
 Deepgram API in a browser (mic permission prompt, live transcript rendering) before this ships —
 an agent can't do either without credentials or a browser.
+
+**Update:** user provisioned `DEEPGRAM_API_KEY` locally. Ran a throwaway script (not committed)
+against the real Deepgram API with `openDeepgramConnection()`, streaming a short `say`-generated
+speech WAV through it: connection authenticated successfully (confirms the `Authorization: Token
+<key>` header format), and the real `Results` payload shape matched what `session.ts` parses
+exactly — `is_final`/`speech_final`/`channel.alternatives[0].transcript` — including correct
+`speech_final: true` on utterance boundaries (end-of-turn) and a trailing `Metadata` message that
+the `data.type !== "Results"` guard correctly ignores. Backend transcription path is now verified
+against the live API, not just mocks. Still `ready-for-human`: the browser mic-capture UI flow
+(getUserMedia permission prompt, MediaRecorder streaming, live transcript rendering) is unverified
+— it needs a real browser and a signed-in Clerk session (magic-link email), neither of which is
+available in this environment.
