@@ -37,3 +37,18 @@ The Docker image build (and thus the `--experimental-strip-types` runtime fix fo
 importing runtime values from `@callie/types`) is also unverified end-to-end — the local Docker daemon
 wasn't running in this environment, so only the underlying Node module-resolution mechanism was checked
 directly, not a full `docker build`.
+
+### Update — deployed
+
+Verified the full Docker build + run locally (`docker build`/`docker run`): image builds clean, `--experimental-strip-types` correctly loads `@callie/types`' raw `.ts` source at runtime, `/health` returns 200.
+
+Neon was provisioned and the migration applied (`pnpm --filter @callie/server db:migrate` against Neon's
+direct connection string); `DATABASE_URL` (pooled connection string) set as a Fly secret on `callie-server`;
+`callie-server` redeployed (`fly deploy . -c apps/server/fly.toml --dockerfile apps/server/Dockerfile` from
+the repo root, since the Dockerfile's `COPY` paths need repo-root build context) and `apps/web` redeployed
+to Vercel (`vercel deploy --prod` from the repo root). Verified end-to-end in production: `/health` returns
+200, `/api/onboarding` returns 401 unauthenticated, and — via `fly ssh console` querying the DB directly
+through the app's own `postgres` driver — the `profiles` table exists on Neon with the expected columns
+(`clerk_user_id`, `l1`, `consent_given_at`, `created_at`).
+
+Ticket 03 has no remaining agent- or human-only work.
