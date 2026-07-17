@@ -47,3 +47,7 @@ minimumReleaseAgeExclude:
   - oxlint@1.74.0
   - '@clerk/react@6.12.5'
   - '@clerk/shared@4.25.5'
+  - '@ai-sdk/anthropic@4.0.16'
+  - '@ai-sdk/gateway@4.0.23'
+  - '@ai-sdk/provider-utils@5.0.11'
+  - ai@7.0.31

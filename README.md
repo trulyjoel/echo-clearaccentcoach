@@ -18,7 +18,9 @@ cp apps/server/.env.example apps/server/.env
 cp apps/web/.env.example apps/web/.env
 # then fill in CLERK_SECRET_KEY / CLERK_PUBLISHABLE_KEY / VITE_CLERK_PUBLISHABLE_KEY
 # from a Clerk app with Password disabled and Email verification link enabled,
-# and DEEPGRAM_API_KEY from https://console.deepgram.com
+# DEEPGRAM_API_KEY from https://console.deepgram.com,
+# ANTHROPIC_API_KEY from https://console.anthropic.com,
+# and ELEVENLABS_API_KEY from https://elevenlabs.io
 
 createdb callie_dev
 createdb callie_test

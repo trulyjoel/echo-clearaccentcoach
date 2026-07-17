@@ -19,3 +19,13 @@ export const sessions = pgTable("sessions", {
   endedAt: timestamp("ended_at", { withTimezone: true }),
   endReason: sessionEndReasonEnum("end_reason"),
 });
+
+export const turns = pgTable("turns", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  sessionId: uuid("session_id")
+    .notNull()
+    .references(() => sessions.id),
+  transcript: text("transcript").notNull(),
+  reply: text("reply").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});

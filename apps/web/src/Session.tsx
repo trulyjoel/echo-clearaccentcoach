@@ -25,6 +25,7 @@ export function Session() {
   const wsRef = useRef<WebSocket | undefined>(undefined);
   const recorderRef = useRef<MediaRecorder | undefined>(undefined);
   const streamRef = useRef<MediaStream | undefined>(undefined);
+  const replyAudioChunksRef = useRef<Blob[]>([]);
 
   const cleanupMedia = useCallback(() => {
     recorderRef.current?.stop();
@@ -49,6 +50,20 @@ export function Session() {
           return;
         case "end_of_turn":
           return;
+        case "reply_text":
+          replyAudioChunksRef.current = [];
+          return;
+        case "reply_audio_end": {
+          const blob = new Blob(replyAudioChunksRef.current, { type: "audio/mpeg" });
+          replyAudioChunksRef.current = [];
+          const url = URL.createObjectURL(blob);
+          const audio = new Audio(url);
+          audio.addEventListener("ended", () => URL.revokeObjectURL(url));
+          audio.play().catch((error: unknown) => {
+            console.error("Failed to play reply audio", error);
+          });
+          return;
+        }
         case "session_ended":
           cleanupMedia();
           setState((prev) => ({
@@ -85,7 +100,11 @@ export function Session() {
       };
 
       ws.onmessage = (event) => {
-        handleServerMessage(JSON.parse(event.data as string) as ServerToClientMessage);
+        if (event.data instanceof Blob) {
+          replyAudioChunksRef.current.push(event.data);
+          return;
+        }
+        handleServerMessage(JSON.parse(event.data) as ServerToClientMessage);
       };
 
       ws.onerror = () => {

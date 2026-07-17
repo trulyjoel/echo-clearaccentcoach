@@ -35,7 +35,7 @@ class FakeWebSocket {
   readyState = 0;
   sent: Array<string | Blob> = [];
   onopen: (() => void) | null = null;
-  onmessage: ((event: { data: string }) => void) | null = null;
+  onmessage: ((event: { data: string | Blob }) => void) | null = null;
   onerror: (() => void) | null = null;
   onclose: (() => void) | null = null;
 
@@ -59,6 +59,33 @@ class FakeWebSocket {
 
   emitServerMessage(message: ServerToClientMessage): void {
     this.onmessage?.({ data: JSON.stringify(message) });
+  }
+
+  emitBinaryMessage(data: Blob): void {
+    this.onmessage?.({ data });
+  }
+}
+
+class FakeAudio {
+  static instances: FakeAudio[] = [];
+  played = false;
+  private readonly listeners: Record<string, Array<() => void>> = {};
+
+  constructor(public src: string) {
+    FakeAudio.instances.push(this);
+  }
+
+  addEventListener(event: string, listener: () => void): void {
+    (this.listeners[event] ??= []).push(listener);
+  }
+
+  play(): Promise<void> {
+    this.played = true;
+    return Promise.resolve();
+  }
+
+  emit(event: string): void {
+    for (const listener of this.listeners[event] ?? []) listener();
   }
 }
 
@@ -91,10 +118,14 @@ describe("Session", () => {
   beforeEach(() => {
     FakeMediaRecorder.instances = [];
     FakeWebSocket.instances = [];
+    FakeAudio.instances = [];
     getUserMedia.mockClear().mockResolvedValue(fakeStream);
     fakeTrack.stop.mockClear();
     vi.stubGlobal("MediaRecorder", FakeMediaRecorder);
     vi.stubGlobal("WebSocket", FakeWebSocket);
+    vi.stubGlobal("Audio", FakeAudio);
+    URL.createObjectURL = vi.fn(() => "blob:fake-url");
+    URL.revokeObjectURL = vi.fn();
     Object.defineProperty(navigator, "mediaDevices", {
       value: { getUserMedia },
       configurable: true,
@@ -204,5 +235,57 @@ describe("Session", () => {
       expect(screen.getByRole("alert")).toHaveTextContent("Transcription error");
     });
     expect(screen.getByRole("button", { name: "Stop session" })).toBeInTheDocument();
+  });
+
+  it("plays the streamed reply audio automatically once reply_audio_end arrives", async () => {
+    const { ws } = await startAndOpenSession();
+
+    ws.emitServerMessage({ type: "reply_text", text: "Nice job!" });
+    ws.emitBinaryMessage(new Blob(["chunk-one"]));
+    ws.emitBinaryMessage(new Blob(["chunk-two"]));
+    ws.emitServerMessage({ type: "reply_audio_end" });
+
+    await waitFor(() => {
+      expect(FakeAudio.instances).toHaveLength(1);
+    });
+    expect(FakeAudio.instances[0]?.played).toBe(true);
+    expect(FakeAudio.instances[0]?.src).toBe("blob:fake-url");
+    expect(URL.createObjectURL).toHaveBeenCalledTimes(1);
+
+    const blob = (URL.createObjectURL as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as Blob;
+    expect(blob.size).toBe("chunk-one".length + "chunk-two".length);
+  });
+
+  it("revokes the object URL once playback ends", async () => {
+    const { ws } = await startAndOpenSession();
+
+    ws.emitServerMessage({ type: "reply_text", text: "Nice job!" });
+    ws.emitBinaryMessage(new Blob(["chunk"]));
+    ws.emitServerMessage({ type: "reply_audio_end" });
+
+    await waitFor(() => {
+      expect(FakeAudio.instances).toHaveLength(1);
+    });
+    FakeAudio.instances[0]?.emit("ended");
+
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:fake-url");
+  });
+
+  it("starts a fresh audio buffer for each new reply", async () => {
+    const { ws } = await startAndOpenSession();
+
+    ws.emitServerMessage({ type: "reply_text", text: "First reply" });
+    ws.emitBinaryMessage(new Blob(["first-chunk"]));
+    ws.emitServerMessage({ type: "reply_audio_end" });
+
+    ws.emitServerMessage({ type: "reply_text", text: "Second reply" });
+    ws.emitBinaryMessage(new Blob(["second"]));
+    ws.emitServerMessage({ type: "reply_audio_end" });
+
+    await waitFor(() => {
+      expect(FakeAudio.instances).toHaveLength(2);
+    });
+    const secondBlob = (URL.createObjectURL as ReturnType<typeof vi.fn>).mock.calls[1]?.[0] as Blob;
+    expect(secondBlob.size).toBe("second".length);
   });
 });

@@ -3,8 +3,9 @@ import { eq } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { db } from "../db/client.js";
-import { profiles, sessions } from "../db/schema.js";
+import { profiles, sessions, turns } from "../db/schema.js";
 import type { DeepgramConnection, DeepgramMessage } from "../deepgram.js";
+import type { ConversationMessage } from "../llm.js";
 
 type InjectedWebSocket = Awaited<ReturnType<FastifyInstance["injectWS"]>>;
 
@@ -81,6 +82,60 @@ vi.mock("../deepgram.js", () => ({
   openDeepgramConnection: deepgramTestState.openDeepgramConnection,
 }));
 
+const llmTestState = vi.hoisted(() => {
+  let replyImpl: (history: ConversationMessage[]) => Promise<string> = async () => "Nice job!";
+  const calls: ConversationMessage[][] = [];
+
+  return {
+    reset: (): void => {
+      replyImpl = async () => "Nice job!";
+      calls.length = 0;
+    },
+    setReplyImpl: (fn: (history: ConversationMessage[]) => Promise<string>): void => {
+      replyImpl = fn;
+    },
+    getCalls: (): ConversationMessage[][] => calls,
+    getLLMProvider: vi.fn(() => ({
+      generateReply: async (history: ConversationMessage[]) => {
+        calls.push(history);
+        return replyImpl(history);
+      },
+    })),
+  };
+});
+
+vi.mock("../llm.js", () => ({ getLLMProvider: llmTestState.getLLMProvider }));
+
+const ttsTestState = vi.hoisted(() => {
+  async function* defaultChunks(): AsyncIterable<Uint8Array> {
+    yield new Uint8Array([1, 2, 3]);
+    yield new Uint8Array([4, 5]);
+  }
+
+  let synthesizeImpl: (text: string) => Promise<AsyncIterable<Uint8Array>> = async () =>
+    defaultChunks();
+  const calls: string[] = [];
+
+  return {
+    reset: (): void => {
+      synthesizeImpl = async () => defaultChunks();
+      calls.length = 0;
+    },
+    setSynthesizeImpl: (fn: (text: string) => Promise<AsyncIterable<Uint8Array>>): void => {
+      synthesizeImpl = fn;
+    },
+    getCalls: (): string[] => calls,
+    getTTSProvider: vi.fn(() => ({
+      synthesize: async (text: string) => {
+        calls.push(text);
+        return synthesizeImpl(text);
+      },
+    })),
+  };
+});
+
+vi.mock("../tts.js", () => ({ getTTSProvider: ttsTestState.getTTSProvider }));
+
 // vitest hoists imports above vi.mock calls, so app.js must be imported after the mocks above are set up.
 const { buildApp } = await import("../app.js");
 
@@ -114,8 +169,41 @@ function messageQueue(ws: InjectedWebSocket): { next: () => Promise<ServerToClie
   };
 }
 
+/**
+ * Like `messageQueue`, but also buffers raw binary frames (the streamed reply audio),
+ * tagged so ordering assertions can interleave JSON and binary expectations.
+ */
+type QueuedFrame =
+  | { kind: "json"; message: ServerToClientMessage }
+  | { kind: "binary"; data: Buffer };
+
+function mixedQueue(ws: InjectedWebSocket): { next: () => Promise<QueuedFrame> } {
+  const received: QueuedFrame[] = [];
+  const waiters: Array<(frame: QueuedFrame) => void> = [];
+
+  ws.on("message", (data: Buffer, isBinary: boolean) => {
+    const frame: QueuedFrame = isBinary
+      ? { kind: "binary", data }
+      : { kind: "json", message: JSON.parse(data.toString()) as ServerToClientMessage };
+    const waiter = waiters.shift();
+    if (waiter) waiter(frame);
+    else received.push(frame);
+  });
+
+  return {
+    next: (): Promise<QueuedFrame> => {
+      const frame = received.shift();
+      if (frame) return Promise.resolve(frame);
+      return new Promise((resolve) => waiters.push(resolve));
+    },
+  };
+}
+
 afterEach(async () => {
   deepgramTestState.setShouldFail(false);
+  llmTestState.reset();
+  ttsTestState.reset();
+  await db.delete(turns);
   await db.delete(sessions);
   await db.delete(profiles);
 });
@@ -349,6 +437,278 @@ describe("GET /api/session", () => {
     expect(await queue.next()).toEqual({ type: "error", message: "Could not start transcription" });
     expect(await queue.next()).toEqual({ type: "session_ended", reason: "error" });
 
+    await app.close();
+  });
+});
+
+describe("turn-based reply loop", () => {
+  function emitSpeechFinal(transcript: string): void {
+    deepgramTestState.getLatest()?.emitMessage({
+      type: "Results",
+      is_final: true,
+      speech_final: true,
+      channel: { alternatives: [{ transcript }] },
+    });
+  }
+
+  it("generates a reply and streams synthesized audio after end_of_turn", async () => {
+    await giveConsent();
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    await queue.next(); // session_started
+
+    emitSpeechFinal("hello Callie");
+
+    expect(await queue.next()).toEqual({
+      kind: "json",
+      message: { type: "transcript", text: "hello Callie", isFinal: true },
+    });
+    expect(await queue.next()).toEqual({ kind: "json", message: { type: "end_of_turn" } });
+    expect(await queue.next()).toEqual({
+      kind: "json",
+      message: { type: "reply_text", text: "Nice job!" },
+    });
+    expect(await queue.next()).toEqual({ kind: "binary", data: Buffer.from([1, 2, 3]) });
+    expect(await queue.next()).toEqual({ kind: "binary", data: Buffer.from([4, 5]) });
+    expect(await queue.next()).toEqual({ kind: "json", message: { type: "reply_audio_end" } });
+
+    expect(ttsTestState.getCalls()).toEqual(["Nice job!"]);
+
+    ws.terminate();
+    await app.close();
+  });
+
+  it("persists a Turn record with the transcript and reply", async () => {
+    await giveConsent();
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    const started = (await queue.next()) as {
+      kind: "json";
+      message: { type: "session_started"; sessionId: string };
+    };
+    const sessionId = started.message.sessionId;
+
+    emitSpeechFinal("hello Callie");
+    await queue.next(); // transcript
+    await queue.next(); // end_of_turn
+    // The Turn is persisted before reply_text is sent, so waiting for it is enough.
+    expect(await queue.next()).toEqual({
+      kind: "json",
+      message: { type: "reply_text", text: "Nice job!" },
+    });
+
+    const rows = await db.select().from(turns).where(eq(turns.sessionId, sessionId));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.transcript).toBe("hello Callie");
+    expect(rows[0]?.reply).toBe("Nice job!");
+
+    // Drain the rest of the pipeline (audio chunks + reply_audio_end) so no fire-and-forget
+    // work from this test is still in flight once afterEach tears down the database rows.
+    await queue.next();
+    await queue.next();
+    await queue.next();
+
+    ws.terminate();
+    await app.close();
+  });
+
+  it("concatenates multiple finalized segments into one turn transcript", async () => {
+    await giveConsent();
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    await queue.next(); // session_started
+
+    deepgramTestState.getLatest()?.emitMessage({
+      type: "Results",
+      is_final: true,
+      speech_final: false,
+      channel: { alternatives: [{ transcript: "hello" }] },
+    });
+    deepgramTestState.getLatest()?.emitMessage({
+      type: "Results",
+      is_final: true,
+      speech_final: true,
+      channel: { alternatives: [{ transcript: "Callie" }] },
+    });
+
+    await queue.next(); // transcript "hello"
+    await queue.next(); // transcript "Callie"
+    await queue.next(); // end_of_turn
+
+    expect(llmTestState.getCalls()).toEqual([[{ role: "user", content: "hello Callie" }]]);
+
+    // Drain the rest of the pipeline before tearing down, per the note above.
+    await queue.next(); // reply_text
+    await queue.next(); // audio chunk
+    await queue.next(); // audio chunk
+    await queue.next(); // reply_audio_end
+
+    ws.terminate();
+    await app.close();
+  });
+
+  /** Drains one turn: transcript, end_of_turn, reply_text, 2 audio chunks, audio_end. */
+  async function drainOneTurn(queue: { next: () => Promise<QueuedFrame> }): Promise<void> {
+    for (let i = 0; i < 6; i++) await queue.next();
+  }
+
+  it("carries recent conversation history into the next turn's reply", async () => {
+    await giveConsent();
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    await queue.next(); // session_started
+
+    emitSpeechFinal("first turn");
+    await drainOneTurn(queue);
+
+    emitSpeechFinal("second turn");
+    await drainOneTurn(queue);
+
+    expect(llmTestState.getCalls()[1]).toEqual([
+      { role: "user", content: "first turn" },
+      { role: "assistant", content: "Nice job!" },
+      { role: "user", content: "second turn" },
+    ]);
+
+    ws.terminate();
+    await app.close();
+  });
+
+  it("sends an error and keeps the session alive when reply generation fails", async () => {
+    await giveConsent();
+    llmTestState.setReplyImpl(async () => {
+      throw new Error("Anthropic unavailable");
+    });
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    const started = (await queue.next()) as {
+      kind: "json";
+      message: { type: "session_started"; sessionId: string };
+    };
+    const sessionId = started.message.sessionId;
+
+    emitSpeechFinal("hello Callie");
+    await queue.next(); // transcript
+    await queue.next(); // end_of_turn
+    expect(await queue.next()).toEqual({
+      kind: "json",
+      message: { type: "error", message: "Could not generate a reply" },
+    });
+
+    const [row] = await db.select().from(sessions).where(eq(sessions.id, sessionId));
+    expect(row?.endedAt).toBeNull();
+    expect(await db.select().from(turns).where(eq(turns.sessionId, sessionId))).toHaveLength(0);
+
+    ws.terminate();
+    await app.close();
+  });
+
+  it("sends an error and persists the Turn even when audio synthesis fails", async () => {
+    await giveConsent();
+    ttsTestState.setSynthesizeImpl(async () => {
+      throw new Error("ElevenLabs unavailable");
+    });
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    const started = (await queue.next()) as {
+      kind: "json";
+      message: { type: "session_started"; sessionId: string };
+    };
+    const sessionId = started.message.sessionId;
+
+    emitSpeechFinal("hello Callie");
+    await queue.next(); // transcript
+    await queue.next(); // end_of_turn
+    expect(await queue.next()).toEqual({
+      kind: "json",
+      message: { type: "reply_text", text: "Nice job!" },
+    });
+    expect(await queue.next()).toEqual({
+      kind: "json",
+      message: { type: "error", message: "Could not synthesize reply audio" },
+    });
+
+    const [row] = await db.select().from(sessions).where(eq(sessions.id, sessionId));
+    expect(row?.endedAt).toBeNull();
+
+    const rows = await db.select().from(turns).where(eq(turns.sessionId, sessionId));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.reply).toBe("Nice job!");
+
+    ws.terminate();
+    await app.close();
+  });
+
+  it("ignores an overlapping turn while the previous one is still being processed", async () => {
+    await giveConsent();
+    let resolveFirstReply: (value: string) => void = () => {};
+    const firstReplyPromise = new Promise<string>((resolve) => {
+      resolveFirstReply = resolve;
+    });
+    llmTestState.setReplyImpl(async () => firstReplyPromise);
+
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    await queue.next(); // session_started
+
+    emitSpeechFinal("first turn");
+    await queue.next(); // transcript
+    await queue.next(); // end_of_turn
+
+    // The mic stays open, so a second speech_final can arrive before the first turn's
+    // LLM call resolves — no barge-in support yet (ticket 06), so this turn is dropped.
+    emitSpeechFinal("second turn");
+    await queue.next(); // transcript
+    await queue.next(); // end_of_turn
+
+    expect(llmTestState.getCalls()).toHaveLength(1);
+
+    // The dropped turn's transcript/end_of_turn were already drained above, so only the
+    // first turn's reply pipeline (reply_text + 2 audio chunks + audio_end) remains.
+    resolveFirstReply("Nice job!");
+    await queue.next(); // reply_text
+    await queue.next(); // audio chunk
+    await queue.next(); // audio chunk
+    await queue.next(); // reply_audio_end
+
+    expect(llmTestState.getCalls()).toHaveLength(1);
+
+    ws.terminate();
     await app.close();
   });
 });

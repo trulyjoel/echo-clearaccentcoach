@@ -25,11 +25,19 @@ export const SESSION_END_REASONS = ["user_ended", "disconnected", "error"] as co
 
 export type SessionEndReason = (typeof SESSION_END_REASONS)[number];
 
-/** Sent from server to client over the /api/session WebSocket. */
+/**
+ * Sent from server to client over the /api/session WebSocket.
+ *
+ * The reply's synthesized audio is not part of this union — it's streamed as raw binary
+ * frames between `reply_text` and `reply_audio_end`, mirroring how the client streams mic
+ * audio up as binary frames alongside its own JSON control messages.
+ */
 export type ServerToClientMessage =
   | { type: "session_started"; sessionId: string }
   | { type: "transcript"; text: string; isFinal: boolean }
   | { type: "end_of_turn" }
+  | { type: "reply_text"; text: string }
+  | { type: "reply_audio_end" }
   | { type: "session_ended"; reason: SessionEndReason }
   | { type: "error"; message: string };
 

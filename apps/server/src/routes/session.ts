@@ -3,9 +3,12 @@ import { eq } from "drizzle-orm";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { getAuthenticatedUserId } from "../auth.js";
 import { db } from "../db/client.js";
-import { profiles, sessions } from "../db/schema.js";
+import { profiles, sessions, turns } from "../db/schema.js";
 import type { DeepgramConnection } from "../deepgram.js";
 import { openDeepgramConnection } from "../deepgram.js";
+import type { ConversationMessage } from "../llm.js";
+import { getLLMProvider } from "../llm.js";
+import { getTTSProvider } from "../tts.js";
 
 /** Browsers can't set custom headers on a WebSocket handshake, so the client passes the Clerk token as a query param. */
 function bridgeQueryToken(request: FastifyRequest): void {
@@ -62,6 +65,59 @@ export function registerSessionRoutes(app: FastifyInstance): void {
         socket.close();
       }
 
+      const conversationHistory: ConversationMessage[] = [];
+      let turnTranscriptParts: string[] = [];
+      // Turns are strictly sequential in this ticket (no barge-in yet, that's ticket 06) — this
+      // guards conversationHistory from being mutated out of order if the user keeps talking
+      // while a reply is still being generated, since the mic stays open throughout.
+      let turnInProgress = false;
+
+      /** Runs the LLM reply + TTS pipeline for one finished user turn. */
+      async function handleTurn(transcript: string): Promise<void> {
+        if (turnInProgress) return;
+        turnInProgress = true;
+        try {
+          conversationHistory.push({ role: "user", content: transcript });
+
+          let replyText: string;
+          try {
+            // Pass a snapshot: conversationHistory keeps mutating (the assistant reply below,
+            // future turns) after this call is made, and callers/tests may hold onto this array.
+            replyText = await getLLMProvider().generateReply([...conversationHistory]);
+          } catch (error) {
+            request.log.error(error, "Failed to generate reply");
+            if (!ended) send({ type: "error", message: "Could not generate a reply" });
+            return;
+          }
+          if (ended) return;
+          conversationHistory.push({ role: "assistant", content: replyText });
+
+          try {
+            await db.insert(turns).values({ sessionId, transcript, reply: replyText });
+          } catch (error) {
+            request.log.error(error, "Failed to persist turn");
+            if (!ended) send({ type: "error", message: "Could not save this turn" });
+            return;
+          }
+          if (ended) return;
+          send({ type: "reply_text", text: replyText });
+
+          try {
+            const audioChunks = await getTTSProvider().synthesize(replyText);
+            for await (const chunk of audioChunks) {
+              if (ended) return;
+              socket.send(Buffer.from(chunk));
+            }
+            if (!ended) send({ type: "reply_audio_end" });
+          } catch (error) {
+            request.log.error(error, "Failed to synthesize reply audio");
+            if (!ended) send({ type: "error", message: "Could not synthesize reply audio" });
+          }
+        } finally {
+          turnInProgress = false;
+        }
+      }
+
       try {
         deepgramConnection = await openDeepgramConnection();
       } catch (error) {
@@ -77,8 +133,13 @@ export function registerSessionRoutes(app: FastifyInstance): void {
         if (!transcript) return;
 
         send({ type: "transcript", text: transcript, isFinal: data.is_final ?? false });
+        if (data.is_final) turnTranscriptParts.push(transcript);
+
         if (data.speech_final) {
           send({ type: "end_of_turn" });
+          const turnTranscript = turnTranscriptParts.join(" ").trim();
+          turnTranscriptParts = [];
+          if (turnTranscript) void handleTurn(turnTranscript);
         }
       });
 
