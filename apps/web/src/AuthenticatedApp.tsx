@@ -20,6 +20,7 @@ export function AuthenticatedApp() {
   const unmountedRef = useRef(false);
 
   useEffect(() => {
+    unmountedRef.current = false;
     return () => {
       unmountedRef.current = true;
     };

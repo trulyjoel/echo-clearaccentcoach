@@ -1,5 +1,6 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { StrictMode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AuthenticatedApp } from "./AuthenticatedApp.js";
 
@@ -84,5 +85,21 @@ describe("AuthenticatedApp", () => {
       expect(screen.getByText("Callie")).toBeInTheDocument();
     });
     expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it("resolves onboarding status under StrictMode's double-invoked effects", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ l1: null, consentGivenAt: null }), { status: 200 }),
+    );
+
+    render(
+      <StrictMode>
+        <AuthenticatedApp />
+      </StrictMode>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("What's your native language?")).toBeInTheDocument();
+    });
   });
 });
