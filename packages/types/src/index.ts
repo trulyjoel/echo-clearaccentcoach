@@ -20,3 +20,18 @@ export interface OnboardingRequest {
   l1: L1;
   consent: boolean;
 }
+
+export const SESSION_END_REASONS = ["user_ended", "disconnected", "error"] as const;
+
+export type SessionEndReason = (typeof SESSION_END_REASONS)[number];
+
+/** Sent from server to client over the /api/session WebSocket. */
+export type ServerToClientMessage =
+  | { type: "session_started"; sessionId: string }
+  | { type: "transcript"; text: string; isFinal: boolean }
+  | { type: "end_of_turn" }
+  | { type: "session_ended"; reason: SessionEndReason }
+  | { type: "error"; message: string };
+
+/** Sent from client to server over the /api/session WebSocket (JSON text frames only — audio is sent as raw binary frames). */
+export type ClientToServerMessage = { type: "end_session" };

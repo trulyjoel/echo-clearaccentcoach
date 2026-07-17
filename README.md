@@ -17,7 +17,8 @@ pnpm install
 cp apps/server/.env.example apps/server/.env
 cp apps/web/.env.example apps/web/.env
 # then fill in CLERK_SECRET_KEY / CLERK_PUBLISHABLE_KEY / VITE_CLERK_PUBLISHABLE_KEY
-# from a Clerk app with Password disabled and Email verification link enabled
+# from a Clerk app with Password disabled and Email verification link enabled,
+# and DEEPGRAM_API_KEY from https://console.deepgram.com
 
 createdb callie_dev
 createdb callie_test

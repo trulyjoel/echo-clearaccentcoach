@@ -1,6 +1,7 @@
 import type { AuthMeResponse } from "@callie/types";
 import { useAuth, UserButton } from "@clerk/react";
 import { useEffect, useState } from "react";
+import { Session } from "./Session.js";
 
 type MeState = { status: "loading" } | { status: "error" } | { status: "ok"; userId: string };
 
@@ -47,6 +48,7 @@ export function Home() {
       {me.status === "loading" && <p>Loading...</p>}
       {me.status === "error" && <p>Couldn't load your account.</p>}
       {me.status === "ok" && <p>Signed in as {me.userId}</p>}
+      <Session />
     </main>
   );
 }
