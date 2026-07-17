@@ -3,7 +3,7 @@ WORKDIR /app
 RUN corepack enable
 
 FROM base AS deps
-COPY pnpm-workspace.yaml package.json pnpm-lock.yaml ./
+COPY pnpm-workspace.yaml package.json pnpm-lock.yaml tsconfig.base.json ./
 COPY packages/types/package.json packages/types/package.json
 COPY apps/server/package.json apps/server/package.json
 RUN pnpm install --frozen-lockfile --filter @callie/server...
