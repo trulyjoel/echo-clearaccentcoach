@@ -5,20 +5,25 @@
   "type": "module",
   "main": "./dist/index.js",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
+    "dev": "tsx watch --env-file=.env src/index.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate"
   },
   "dependencies": {
     "@callie/types": "workspace:*",
     "@clerk/fastify": "3.1.52",
     "@fastify/cors": "11.3.0",
-    "fastify": "5.10.0"
+    "drizzle-orm": "0.45.2",
+    "fastify": "5.10.0",
+    "postgres": "3.4.9"
   },
   "devDependencies": {
     "@types/node": "26.1.1",
+    "drizzle-kit": "0.31.10",
     "tsx": "4.23.1",
     "typescript": "7.0.2",
     "vitest": "4.1.10"

@@ -1,5 +1,5 @@
 import { Show, SignIn } from "@clerk/react";
-import { Home } from "./Home.js";
+import { AuthenticatedApp } from "./AuthenticatedApp.js";
 
 export function App() {
   return (
@@ -8,7 +8,7 @@ export function App() {
         <SignIn />
       </Show>
       <Show when="signed-in">
-        <Home />
+        <AuthenticatedApp />
       </Show>
     </>
   );

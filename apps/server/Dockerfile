@@ -21,4 +21,6 @@ COPY --from=build /app/apps/server/node_modules ./apps/server/node_modules
 COPY --from=build /app/packages/types ./packages/types
 COPY --from=build /app/node_modules ./node_modules
 EXPOSE 3000
-CMD ["node", "apps/server/dist/index.js"]
+# dist/index.js imports @callie/types, which ships raw .ts source with no build
+# step of its own — strip-types lets Node load it directly at runtime.
+CMD ["node", "--experimental-strip-types", "apps/server/dist/index.js"]

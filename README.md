@@ -10,7 +10,7 @@ Conversational voice agent for L2 English coaching. See `.scratch/callie-voice-a
 
 ## Development
 
-Requires Node 22+ and pnpm.
+Requires Node 22+, pnpm, and a local Postgres server.
 
 ```sh
 pnpm install
@@ -18,10 +18,21 @@ cp apps/server/.env.example apps/server/.env
 cp apps/web/.env.example apps/web/.env
 # then fill in CLERK_SECRET_KEY / CLERK_PUBLISHABLE_KEY / VITE_CLERK_PUBLISHABLE_KEY
 # from a Clerk app with Password disabled and Email verification link enabled
+
+createdb callie_dev
+createdb callie_test
+# set DATABASE_URL in apps/server/.env to point at callie_dev, e.g.
+#   DATABASE_URL=postgresql://<you>@localhost:5432/callie_dev
+# and apps/server/.env.test (gitignored) to point at callie_test
+pnpm --filter @callie/server db:migrate
+
 pnpm dev          # runs the server (http://localhost:3000) and web app (http://localhost:5173) together
 ```
 
 Run server and web individually with `pnpm dev:server` / `pnpm dev:web`.
+
+Schema changes: edit `apps/server/src/db/schema.ts`, then `pnpm --filter @callie/server db:generate`
+to write a migration and `db:migrate` to apply it (run against both `callie_dev` and the test database).
 
 ## Checks
 

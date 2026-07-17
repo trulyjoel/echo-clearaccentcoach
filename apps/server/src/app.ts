@@ -2,6 +2,7 @@ import cors from "@fastify/cors";
 import { clerkPlugin } from "@clerk/fastify";
 import Fastify, { type FastifyInstance } from "fastify";
 import { registerAuthRoutes } from "./routes/auth.js";
+import { registerOnboardingRoutes } from "./routes/onboarding.js";
 
 export function buildApp(): FastifyInstance {
   const app = Fastify({ logger: true });
@@ -13,6 +14,7 @@ export function buildApp(): FastifyInstance {
   app.register(async (apiApp) => {
     apiApp.register(clerkPlugin);
     registerAuthRoutes(apiApp);
+    registerOnboardingRoutes(apiApp);
   });
 
   return app;

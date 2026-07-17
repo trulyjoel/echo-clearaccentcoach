@@ -14,8 +14,8 @@ vi.mock("@clerk/react", () => ({
   SignIn: () => <div>Sign in with your email</div>,
 }));
 
-vi.mock("./Home.js", () => ({
-  Home: () => <div>Home page</div>,
+vi.mock("./AuthenticatedApp.js", () => ({
+  AuthenticatedApp: () => <div>Home page</div>,
 }));
 
 describe("App", () => {
