@@ -266,7 +266,31 @@ export function registerSessionRoutes(app: FastifyInstance): void {
         return;
       }
 
+      /**
+       * Ends the current turn and hands it to `handleTurn`, draining the buffered transcript and
+       * audio. Called from both `speech_final` and the `UtteranceEnd` fallback below; the buffer
+       * being empty (already drained) is what makes calling this from both a no-op the second
+       * time, so a `speech_final` immediately followed by `UtteranceEnd` — which Deepgram's docs
+       * say can happen — doesn't double-process the turn.
+       */
+      function flushTurn(): void {
+        send({ type: "end_of_turn" });
+        const turnTranscript = turnTranscriptParts.join(" ").trim();
+        turnTranscriptParts = [];
+        const turnAudio = Buffer.concat(turnAudioChunks);
+        turnAudioChunks = [];
+        if (turnTranscript) void handleTurn(turnTranscript, turnAudio);
+      }
+
       deepgramConnection.on("message", (data) => {
+        // Endpointing's speech_final is a known-flaky signal (Deepgram's own docs: background
+        // noise/VAD interaction can prevent it from ever firing) — UtteranceEnd is Deepgram's
+        // documented independent fallback for exactly that case, so a turn doesn't get stuck
+        // waiting on a signal that never arrives.
+        if (data.type === "UtteranceEnd") {
+          flushTurn();
+          return;
+        }
         if (data.type !== "Results") return;
         const transcript = data.channel.alternatives[0]?.transcript ?? "";
         if (!transcript) return;
@@ -287,14 +311,7 @@ export function registerSessionRoutes(app: FastifyInstance): void {
         send({ type: "transcript", text: transcript, isFinal: data.is_final ?? false });
         if (data.is_final) turnTranscriptParts.push(transcript);
 
-        if (data.speech_final) {
-          send({ type: "end_of_turn" });
-          const turnTranscript = turnTranscriptParts.join(" ").trim();
-          turnTranscriptParts = [];
-          const turnAudio = Buffer.concat(turnAudioChunks);
-          turnAudioChunks = [];
-          if (turnTranscript) void handleTurn(turnTranscript, turnAudio);
-        }
+        if (data.speech_final) flushTurn();
       });
 
       deepgramConnection.on("error", (error) => {

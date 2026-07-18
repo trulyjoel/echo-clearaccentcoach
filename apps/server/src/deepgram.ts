@@ -50,6 +50,11 @@ export async function openDeepgramConnection(): Promise<DeepgramConnection> {
     // actually finished — 300ms is Deepgram's own recommended value for conversational speech
     // where speakers pause mid-thought.
     endpointing: "300",
+    // Endpointing's speech_final can fail to fire at all (VAD/background-noise interaction is a
+    // known Deepgram limitation, not just an edge case) and leave a turn stuck forever. Deepgram's
+    // own docs recommend running UtteranceEnd alongside it as an independent fallback signal —
+    // 1000ms is its documented minimum.
+    utterance_end_ms: "1000",
     // The WS connect call doesn't inherit the client's apiKey as an auth header — Deepgram's
     // scheme is "Authorization: Token <key>", unlike the REST client's own auth provider.
     Authorization: `Token ${getApiKey()}`,

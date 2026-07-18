@@ -638,6 +638,100 @@ describe("turn-based reply loop", () => {
     await app.close();
   });
 
+  it("still signals end_of_turn on speech_final when no finalized segment was buffered", async () => {
+    // Deepgram's own docs show speech_final: true arriving on a result where is_final is still
+    // false — the client needs to know the turn ended even though nothing made it into the
+    // transcript buffer yet, so it doesn't treat the mic as still "listening".
+    await giveConsent();
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    await queue.next(); // session_started
+
+    deepgramTestState.getLatest()?.emitMessage({
+      type: "Results",
+      is_final: false,
+      speech_final: true,
+      channel: { alternatives: [{ transcript: "hello" }] },
+    });
+
+    await queue.next(); // transcript
+    expect(await queue.next()).toEqual({ kind: "json", message: { type: "end_of_turn" } });
+    expect(llmTestState.getCalls()).toHaveLength(0);
+
+    ws.terminate();
+    await app.close();
+  });
+
+  it("falls back to UtteranceEnd to end the turn when speech_final never arrives", async () => {
+    await giveConsent();
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    await queue.next(); // session_started
+
+    deepgramTestState.getLatest()?.emitMessage({
+      type: "Results",
+      is_final: true,
+      speech_final: false,
+      channel: { alternatives: [{ transcript: "hello Callie" }] },
+    });
+    await queue.next(); // transcript
+
+    deepgramTestState.getLatest()?.emitMessage({ type: "UtteranceEnd" });
+
+    expect(await queue.next()).toEqual({ kind: "json", message: { type: "end_of_turn" } });
+    expect(llmTestState.getCalls()).toEqual([[{ role: "user", content: "hello Callie" }]]);
+
+    // Drain the rest of the pipeline before tearing down, per the note above.
+    await queue.next(); // reply_text
+    await queue.next(); // audio chunk
+    await queue.next(); // audio chunk
+    await queue.next(); // reply_audio_end
+
+    ws.terminate();
+    await app.close();
+  });
+
+  it("ignores UtteranceEnd when speech_final already ended the turn", async () => {
+    await giveConsent();
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    await queue.next(); // session_started
+
+    emitSpeechFinal("hello Callie");
+    await queue.next(); // transcript
+    await queue.next(); // end_of_turn
+
+    deepgramTestState.getLatest()?.emitMessage({ type: "UtteranceEnd" });
+
+    // Drain the one legitimate turn's pipeline.
+    await queue.next(); // reply_text
+    await queue.next(); // audio chunk
+    await queue.next(); // audio chunk
+    await queue.next(); // reply_audio_end
+
+    // Give any wrongly-triggered second turn a chance to start before asserting it didn't.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(llmTestState.getCalls()).toHaveLength(1);
+
+    ws.terminate();
+    await app.close();
+  });
+
   /** Drains one turn: transcript, end_of_turn, reply_text, 2 audio chunks, audio_end. */
   async function drainOneTurn(queue: { next: () => Promise<QueuedFrame> }): Promise<void> {
     for (let i = 0; i < 6; i++) await queue.next();
