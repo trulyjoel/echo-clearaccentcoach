@@ -70,3 +70,19 @@ Status set to `ready-for-human` rather than `ready-for-agent`: same reasoning as
 `DEEPGRAM_API_KEY` isn't provisioned in this environment, so the `vad_events`/`SpeechStarted`
 wiring is verified against the fake Deepgram connection in tests only, not real Deepgram VAD
 behavior.
+
+**Update:** the real-Deepgram gap above was the actual failure mode: against a live mic, `vad_events`'s
+`SpeechStarted` fired on background noise (empty-transcript utterances), not just genuine barge-in,
+marking almost every turn interrupted within a few hundred ms — before `analyzeErrors`/`generateReply`
+ever got a chance to run, so Callie never replied. Replaced VAD-based detection with confirmed-speech
+detection: `apps/server/src/routes/session.ts`'s `Results` handler now marks a turn interrupted when a
+*non-empty transcript* arrives while that turn's pipeline is active, rather than reacting to the bare
+`SpeechStarted` ping — background noise can trigger VAD but can't produce recognized words, so this is
+immune to the false-positive failure mode. `apps/server/src/deepgram.ts` no longer requests `vad_events`
+and `DeepgramMessage` dropped the `SpeechStarted` variant, both now dead. This also unifies the
+previously-separate "true VAD-flagged barge-in" and "overlapping speech with no VAD signal" cases (the
+latter used to be silently dropped, per ticket 05's overlap guard) into one behavior: any confirmed new
+speech while a turn is in flight cancels it and is processed as the next turn immediately — the
+"ignores an overlapping turn" test in ticket 05's describe block was removed since it asserted the
+now-incorrect drop-silently behavior, and the barge-in tests were updated to emit a confirming
+transcript instead of a bare `SpeechStarted` message.

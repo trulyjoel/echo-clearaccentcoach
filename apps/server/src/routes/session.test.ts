@@ -690,50 +690,6 @@ describe("turn-based reply loop", () => {
     await app.close();
   });
 
-  it("ignores an overlapping turn while the previous one is still being processed", async () => {
-    await giveConsent();
-    let resolveFirstReply: (value: string) => void = () => {};
-    const firstReplyPromise = new Promise<string>((resolve) => {
-      resolveFirstReply = resolve;
-    });
-    llmTestState.setReplyImpl(async () => firstReplyPromise);
-
-    const app = buildApp();
-    await app.ready();
-
-    const ws = await app.injectWS("/api/session", {
-      headers: { authorization: "Bearer test-user-session-456" },
-    });
-    const queue = mixedQueue(ws);
-    await queue.next(); // session_started
-
-    emitSpeechFinal("first turn");
-    await queue.next(); // transcript
-    await queue.next(); // end_of_turn
-
-    // The mic stays open, so a second speech_final can arrive before the first turn's LLM
-    // call resolves. Without an explicit Deepgram SpeechStarted event in between (the real
-    // barge-in signal, see the "barge-in support" tests below), this is treated as a stray
-    // overlap rather than a barge-in, and the turn is dropped.
-    emitSpeechFinal("second turn");
-    await queue.next(); // transcript
-    await queue.next(); // end_of_turn
-
-    expect(llmTestState.getCalls()).toHaveLength(1);
-
-    // The dropped turn's transcript/end_of_turn were already drained above, so only the
-    // first turn's reply pipeline (reply_text + 2 audio chunks + audio_end) remains.
-    resolveFirstReply("Nice job!");
-    await queue.next(); // reply_text
-    await queue.next(); // audio chunk
-    await queue.next(); // audio chunk
-    await queue.next(); // reply_audio_end
-
-    expect(llmTestState.getCalls()).toHaveLength(1);
-
-    ws.terminate();
-    await app.close();
-  });
 });
 
 describe("two-pass correction pipeline", () => {
@@ -894,8 +850,14 @@ describe("barge-in support", () => {
     });
   }
 
-  function emitSpeechStarted(): void {
-    deepgramTestState.getLatest()?.emitMessage({ type: "SpeechStarted" });
+  /** Recognized speech arriving mid-utterance — the confirmed signal that drives barge-in. */
+  function emitInterimSpeech(transcript: string): void {
+    deepgramTestState.getLatest()?.emitMessage({
+      type: "Results",
+      is_final: false,
+      speech_final: false,
+      channel: { alternatives: [{ transcript }] },
+    });
   }
 
   it("does nothing when speech starts and no reply is in progress", async () => {
@@ -909,16 +871,9 @@ describe("barge-in support", () => {
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
 
-    emitSpeechStarted();
-
-    // The next real signal (a transcript from ordinary speech) proves no reply_interrupted
-    // was queued ahead of it.
-    deepgramTestState.getLatest()?.emitMessage({
-      type: "Results",
-      is_final: false,
-      speech_final: false,
-      channel: { alternatives: [{ transcript: "hi" }] },
-    });
+    // With no turn in flight, recognized speech is just an ordinary transcript — no
+    // reply_interrupted is queued ahead of it.
+    emitInterimSpeech("hi");
     expect(await queue.next()).toEqual({
       kind: "json",
       message: { type: "transcript", text: "hi", isFinal: false },
@@ -956,7 +911,7 @@ describe("barge-in support", () => {
     await queue.next(); // reply_text
     expect(await queue.next()).toEqual({ kind: "binary", data: Buffer.from([1]) });
 
-    emitSpeechStarted();
+    emitInterimSpeech("wait");
     expect(await queue.next()).toEqual({ kind: "json", message: { type: "reply_interrupted" } });
 
     resolveContinue();
@@ -1001,7 +956,7 @@ describe("barge-in support", () => {
     await queue.next(); // reply_text — the Turn is persisted before this is sent
     await queue.next(); // audio chunk 1
 
-    emitSpeechStarted();
+    emitInterimSpeech("wait");
     await queue.next(); // reply_interrupted
     resolveContinue();
     // Give the interrupted turn's continuation a tick to run.
@@ -1037,13 +992,12 @@ describe("barge-in support", () => {
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
 
-    emitSpeechStarted();
-    expect(await queue.next()).toEqual({ kind: "json", message: { type: "reply_interrupted" } });
-
-    // The new turn is processed immediately — it doesn't wait for the interrupted turn's
-    // still-pending LLM call to resolve.
+    // The new turn's own recognized speech is itself the confirmation of barge-in — no
+    // separate signal needed. It's processed immediately, without waiting for the
+    // interrupted turn's still-pending LLM call to resolve.
     llmTestState.setReplyImpl(async () => "Nice job!");
     emitSpeechFinal("second turn");
+    expect(await queue.next()).toEqual({ kind: "json", message: { type: "reply_interrupted" } });
     expect(await queue.next()).toEqual({
       kind: "json",
       message: { type: "transcript", text: "second turn", isFinal: true },
@@ -1085,7 +1039,7 @@ describe("barge-in support", () => {
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
 
-    emitSpeechStarted();
+    emitInterimSpeech("wait");
     expect(await queue.next()).toEqual({ kind: "json", message: { type: "reply_interrupted" } });
 
     resolveFirstReply("Stale reply");

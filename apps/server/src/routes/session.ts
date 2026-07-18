@@ -70,11 +70,11 @@ export function registerSessionRoutes(app: FastifyInstance): void {
       let turnTranscriptParts: string[] = [];
 
       /**
-       * Tracks the turn whose LLM/TTS pipeline is currently running, so a Deepgram
-       * SpeechStarted event (the user talking over a reply) can mark it interrupted — the
-       * pipeline checks `interrupted` at each await boundary and bails without sending more
-       * to the client. `activeTurn` is nulled out immediately on barge-in (rather than waiting
-       * for the interrupted pipeline's own cleanup) so the next turn isn't held up by it.
+       * Tracks the turn whose LLM/TTS pipeline is currently running, so a subsequent confirmed
+       * transcript (the user talking over a reply) can mark it interrupted — the pipeline checks
+       * `interrupted` at each await boundary and bails without sending more to the client.
+       * `activeTurn` is nulled out immediately on barge-in (rather than waiting for the
+       * interrupted pipeline's own cleanup) so the next turn isn't held up by it.
        */
       interface ActiveTurn {
         interrupted: boolean;
@@ -160,17 +160,18 @@ export function registerSessionRoutes(app: FastifyInstance): void {
       }
 
       deepgramConnection.on("message", (data) => {
-        if (data.type === "SpeechStarted") {
-          if (activeTurn) {
-            activeTurn.interrupted = true;
-            activeTurn = null;
-            send({ type: "reply_interrupted" });
-          }
-          return;
-        }
         if (data.type !== "Results") return;
         const transcript = data.channel.alternatives[0]?.transcript ?? "";
         if (!transcript) return;
+
+        // A non-empty transcript arriving while a turn's pipeline is running is real barge-in —
+        // unlike a bare VAD "speech started" ping, background noise can't produce recognized
+        // words, so this can't false-trigger on breathing or room noise the way VAD alone can.
+        if (activeTurn) {
+          activeTurn.interrupted = true;
+          activeTurn = null;
+          send({ type: "reply_interrupted" });
+        }
 
         send({ type: "transcript", text: transcript, isFinal: data.is_final ?? false });
         if (data.is_final) turnTranscriptParts.push(transcript);
