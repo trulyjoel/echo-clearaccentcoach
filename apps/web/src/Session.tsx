@@ -136,6 +136,13 @@ export function Session() {
           return;
         case "error":
           setServerError(message.message);
+          // Before session_started, an error means the server rejected the session outright
+          // (no consent, daily cap reached) — show it in place of the generic connection error
+          // instead of leaving the UI stuck on "Connecting...".
+          setState((prev) =>
+            prev.status === "starting" ? { status: "error", message: message.message } : prev,
+          );
+          return;
       }
     },
     [cleanupMedia],

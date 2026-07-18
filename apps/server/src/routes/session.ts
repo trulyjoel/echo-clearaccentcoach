@@ -19,11 +19,23 @@ import { getMaxSessionDurationMs, hasReachedDailySessionCap } from "../sessionLi
 import { getTTSProvider } from "../tts.js";
 import { ensureUsageRecord, recordUsage } from "../usage.js";
 
-type Profile = typeof profiles.$inferSelect;
-
-/** `requireConsentedUser` stashes the profile row here so the handler doesn't re-query it. */
-interface RequestWithProfile extends FastifyRequest {
-  profile?: Profile;
+/**
+ * Rejects the WebSocket upgrade (with a normal HTTP status) unless the user is authenticated.
+ *
+ * Consent and the daily session cap are deliberately NOT checked here: an HTTP-level rejection
+ * of the upgrade gives the browser's WebSocket API no way to surface the reason (`ws.onerror`
+ * carries no status or body), so the client can only show a generic "Connection error." The
+ * session handler checks those instead, once the socket is open, so it can send a real
+ * `{type: "error"}` message the client can display.
+ */
+async function requireAuthenticatedUser(
+  request: FastifyRequest,
+  reply: FastifyReply,
+): Promise<void> {
+  bridgeQueryToken(request);
+  if (!getAuthenticatedUserId(request)) {
+    await reply.code(401).send({ error: "Not authenticated" });
+  }
 }
 
 /** Browsers can't set custom headers on a WebSocket handshake, so the client passes the Clerk token as a query param. */
@@ -32,29 +44,6 @@ function bridgeQueryToken(request: FastifyRequest): void {
   if (token && !request.headers.authorization) {
     request.headers.authorization = `Bearer ${token}`;
   }
-}
-
-/** Rejects the WebSocket upgrade (with a normal HTTP status) unless the user is authenticated and consented. */
-async function requireConsentedUser(request: FastifyRequest, reply: FastifyReply): Promise<void> {
-  bridgeQueryToken(request);
-  const userId = getAuthenticatedUserId(request);
-  if (!userId) {
-    await reply.code(401).send({ error: "Not authenticated" });
-    return;
-  }
-
-  const [profile] = await db.select().from(profiles).where(eq(profiles.clerkUserId, userId));
-  if (!profile?.l1 || !profile.consentGivenAt) {
-    await reply.code(403).send({ error: "Recording consent required" });
-    return;
-  }
-
-  if (await hasReachedDailySessionCap(userId)) {
-    await reply.code(429).send({ error: "Daily session limit reached" });
-    return;
-  }
-
-  (request as RequestWithProfile).profile = profile;
 }
 
 interface PersistedTurn {
@@ -100,20 +89,32 @@ async function maybeStoreClip(
 export function registerSessionRoutes(app: FastifyInstance): void {
   app.get(
     "/api/session",
-    { websocket: true, preValidation: requireConsentedUser },
+    { websocket: true, preValidation: requireAuthenticatedUser },
     async (socket, request) => {
       function send(message: ServerToClientMessage): void {
         socket.send(JSON.stringify(message));
       }
+      function reject(message: string): void {
+        send({ type: "error", message });
+        socket.close();
+      }
 
-      // preValidation already confirmed the user is authenticated, consented, and under the
-      // daily session cap, and stashed the profile it looked up onto the request.
+      // preValidation already confirmed the user is authenticated.
       const userId = getAuthenticatedUserId(request);
-      const profile = (request as RequestWithProfile).profile;
-      if (!userId || !profile) {
+      if (!userId) {
         throw new Error("Unreachable: preValidation should have rejected this request");
       }
-      const l1: L1 = profile.l1 ?? "other";
+
+      const [profile] = await db.select().from(profiles).where(eq(profiles.clerkUserId, userId));
+      if (!profile?.l1 || !profile.consentGivenAt) {
+        reject("Recording consent required");
+        return;
+      }
+      if (await hasReachedDailySessionCap(userId)) {
+        reject("Daily session limit reached");
+        return;
+      }
+      const l1: L1 = profile.l1;
       const hasConsent = Boolean(profile.consentGivenAt);
 
       const [session] = await db.insert(sessions).values({ clerkUserId: userId }).returning();
@@ -219,8 +220,8 @@ export function registerSessionRoutes(app: FastifyInstance): void {
             if (!ended) send({ type: "error", message: "Could not save this turn" });
             return;
           }
-          // `requireConsentedUser` already guarantees consent for every session that reaches
-          // here — `profile.consentGivenAt` is defense-in-depth against that gate ever changing.
+          // The consent check above already guarantees consent for every session that reaches
+          // here — `hasConsent` is defense-in-depth against that gate ever changing.
           const hasErrors = errors.length > 0;
           await maybeStoreClip(persistedTurn, audio, hasErrors && hasConsent, request.log);
           if (aborted()) return;

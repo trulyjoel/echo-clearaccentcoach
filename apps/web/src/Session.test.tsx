@@ -231,6 +231,24 @@ describe("Session", () => {
     });
   });
 
+  it("shows the server's error message when rejected before the session starts", async () => {
+    const user = userEvent.setup();
+    render(<Session />);
+    await user.click(screen.getByRole("button", { name: "Start session" }));
+
+    await waitFor(() => {
+      expect(FakeWebSocket.instances).toHaveLength(1);
+    });
+    const ws = FakeWebSocket.instances[0]!;
+    ws.open();
+    ws.emitServerMessage({ type: "error", message: "Daily session limit reached" });
+
+    await waitFor(() => {
+      expect(screen.getByText("Daily session limit reached")).toBeInTheDocument();
+    });
+    expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
+  });
+
   it("shows a transient server error banner without ending the session", async () => {
     const { ws } = await startAndOpenSession();
 

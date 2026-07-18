@@ -285,13 +285,22 @@ describe("GET /api/session", () => {
     await app.close();
   });
 
-  it("rejects the upgrade when the user hasn't completed onboarding consent", async () => {
+  it("sends an error message and closes when the user hasn't completed onboarding consent", async () => {
     const app = buildApp();
     await app.ready();
 
-    await expect(
-      app.injectWS("/api/session", { headers: { authorization: "Bearer test-user-session-456" } }),
-    ).rejects.toThrow(/403/);
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = messageQueue(ws);
+
+    expect(await queue.next()).toEqual({
+      type: "error",
+      message: "Recording consent required",
+    });
+    await new Promise<void>((resolve) => ws.on("close", resolve));
+
+    expect(await db.select().from(sessions)).toHaveLength(0);
 
     await app.close();
   });
@@ -1026,7 +1035,7 @@ describe("session limits", () => {
     delete process.env["MAX_SESSION_DURATION_MINUTES"];
   });
 
-  it("rejects starting a new session once the daily session cap is reached", async () => {
+  it("sends an error message and closes a new session once the daily session cap is reached", async () => {
     await giveConsent();
     process.env["DAILY_SESSION_CAP"] = "1";
     const app = buildApp();
@@ -1038,9 +1047,18 @@ describe("session limits", () => {
     await messageQueue(ws).next(); // session_started
     ws.terminate();
 
-    await expect(
-      app.injectWS("/api/session", { headers: { authorization: "Bearer test-user-session-456" } }),
-    ).rejects.toThrow(/429/);
+    const ws2 = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue2 = messageQueue(ws2);
+
+    expect(await queue2.next()).toEqual({
+      type: "error",
+      message: "Daily session limit reached",
+    });
+    await new Promise<void>((resolve) => ws2.on("close", resolve));
+
+    expect(await db.select().from(sessions)).toHaveLength(1);
 
     await app.close();
   });
