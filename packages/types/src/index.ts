@@ -43,6 +43,13 @@ export interface DetectedError {
   explanation: string;
 }
 
+/** A `DetectedError` once persisted, addressable for clip/target-audio playback (ticket 12). */
+export interface PersistedError extends DetectedError {
+  id: string;
+  /** Whether a stored audio clip exists for this error's turn (ticket 11). */
+  hasClip: boolean;
+}
+
 /**
  * Sent from server to client over the /api/session WebSocket.
  *
@@ -57,7 +64,7 @@ export type ServerToClientMessage =
   | { type: "session_started"; sessionId: string }
   | { type: "transcript"; text: string; isFinal: boolean }
   | { type: "end_of_turn" }
-  | { type: "turn_errors"; turnId: string; createdAt: string; errors: DetectedError[] }
+  | { type: "turn_errors"; turnId: string; createdAt: string; errors: PersistedError[] }
   | { type: "reply_text"; text: string }
   | { type: "reply_audio_end" }
   | { type: "reply_interrupted" }

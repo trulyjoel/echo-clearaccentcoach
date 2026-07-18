@@ -449,6 +449,8 @@ describe("Session", () => {
       createdAt: "2026-07-18T12:00:00.000Z",
       errors: [
         {
+          id: "error-1",
+          hasClip: true,
           category: "subject_verb_agreement",
           original: "she go",
           corrected: "she goes",
@@ -486,6 +488,8 @@ describe("Session", () => {
       createdAt: "2026-07-18T12:00:00.000Z",
       errors: [
         {
+          id: "error-1",
+          hasClip: false,
           category: "word_order",
           original: "go I",
           corrected: "I go",
@@ -499,6 +503,8 @@ describe("Session", () => {
       createdAt: "2026-07-18T12:01:00.000Z",
       errors: [
         {
+          id: "error-2",
+          hasClip: false,
           category: "article_usage",
           original: "I saw dog",
           corrected: "I saw a dog",
@@ -523,6 +529,8 @@ describe("Session", () => {
       createdAt: "2026-07-18T12:00:00.000Z",
       errors: [
         {
+          id: "error-1",
+          hasClip: false,
           category: "preposition_choice",
           original: "arrive to the station",
           corrected: "arrive at the station",
@@ -557,6 +565,8 @@ describe("Session", () => {
       createdAt: "2026-07-18T12:00:00.000Z",
       errors: [
         {
+          id: "error-1",
+          hasClip: false,
           category: "verb_tense_aspect",
           original: "I am go",
           corrected: "I am going",
@@ -658,5 +668,106 @@ describe("Session", () => {
       expect(FakeMediaSource.instances[1]?.sourceBuffers[0]?.appendedText()).toBe("second");
     });
     expect(FakeMediaSource.instances[0]?.sourceBuffers[0]?.appendedText()).toBe("first-chunk");
+  });
+
+  describe("error clip/target-audio playback", () => {
+    const fetchMock = vi.fn();
+
+    beforeEach(() => {
+      vi.stubGlobal("fetch", fetchMock);
+      fetchMock.mockReset().mockResolvedValue({
+        ok: true,
+        status: 200,
+        blob: () => Promise.resolve(new Blob(["audio-bytes"])),
+      });
+    });
+
+    async function emitOneError(hasClip: boolean): Promise<FakeWebSocket> {
+      const { ws } = await startAndOpenSession();
+      ws.emitServerMessage({
+        type: "turn_errors",
+        turnId: "turn-1",
+        createdAt: "2026-07-18T12:00:00.000Z",
+        errors: [
+          {
+            id: "error-1",
+            hasClip,
+            category: "word_order",
+            original: "go I",
+            corrected: "I go",
+            explanation: "Subject comes before the verb in English statements.",
+          },
+        ],
+      });
+      await screen.findByText("go I");
+      return ws;
+    }
+
+    it("shows a Play my clip button only when the error has a stored clip", async () => {
+      await emitOneError(true);
+      expect(screen.getByRole("button", { name: "Play my clip" })).toBeInTheDocument();
+    });
+
+    it("omits the Play my clip button when the error has no stored clip", async () => {
+      await emitOneError(false);
+      expect(screen.queryByRole("button", { name: "Play my clip" })).not.toBeInTheDocument();
+    });
+
+    it("always shows a Play target button, regardless of clip availability", async () => {
+      await emitOneError(false);
+      expect(screen.getByRole("button", { name: "Play target" })).toBeInTheDocument();
+    });
+
+    it("fetches and plays the error's clip with an auth header when clicked", async () => {
+      await emitOneError(true);
+      const user = userEvent.setup();
+
+      await user.click(screen.getByRole("button", { name: "Play my clip" }));
+
+      await waitFor(() => {
+        expect(fetchMock).toHaveBeenCalledWith(
+          expect.stringContaining("/api/errors/error-1/clip"),
+          expect.objectContaining({ headers: { Authorization: "Bearer test-token" } }),
+        );
+      });
+      await waitFor(() => {
+        expect(FakeAudio.instances.some((audio) => audio.played)).toBe(true);
+      });
+    });
+
+    it("fetches and plays the target audio when clicked", async () => {
+      await emitOneError(false);
+      const user = userEvent.setup();
+
+      await user.click(screen.getByRole("button", { name: "Play target" }));
+
+      await waitFor(() => {
+        expect(fetchMock).toHaveBeenCalledWith(
+          expect.stringContaining("/api/errors/error-1/target-audio"),
+          expect.objectContaining({ headers: { Authorization: "Bearer test-token" } }),
+        );
+      });
+      await waitFor(() => {
+        expect(FakeAudio.instances.some((audio) => audio.played)).toBe(true);
+      });
+    });
+
+    it("shows an alert if the fetch fails, without crashing the panel", async () => {
+      fetchMock.mockResolvedValue({
+        ok: false,
+        status: 404,
+        blob: () => Promise.resolve(new Blob()),
+      });
+      const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+      await emitOneError(false);
+      const user = userEvent.setup();
+
+      await user.click(screen.getByRole("button", { name: "Play target" }));
+
+      await waitFor(() => {
+        expect(screen.getByRole("alert")).toHaveTextContent("Couldn't play that audio.");
+      });
+      consoleError.mockRestore();
+    });
   });
 });

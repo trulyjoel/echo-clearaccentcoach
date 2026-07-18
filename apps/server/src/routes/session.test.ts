@@ -1028,7 +1028,7 @@ describe("correction text panel", () => {
         type: "turn_errors",
         turnId: expect.any(String),
         createdAt: expect.any(String),
-        errors: [sampleError],
+        errors: [{ ...sampleError, id: expect.any(String), hasClip: true }],
       },
     });
 

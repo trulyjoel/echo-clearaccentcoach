@@ -1,7 +1,13 @@
-import { DeleteObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import {
+  DeleteObjectCommand,
+  GetObjectCommand,
+  PutObjectCommand,
+  S3Client,
+} from "@aws-sdk/client-s3";
 
 export interface StorageProvider {
   upload(key: string, data: Buffer, contentType: string): Promise<void>;
+  download(key: string): Promise<Buffer>;
   delete(key: string): Promise<void>;
 }
 
@@ -35,6 +41,14 @@ class R2StorageProvider implements StorageProvider {
     await getClient().send(
       new PutObjectCommand({ Bucket: getBucket(), Key: key, Body: data, ContentType: contentType }),
     );
+  }
+
+  async download(key: string): Promise<Buffer> {
+    const response = await getClient().send(
+      new GetObjectCommand({ Bucket: getBucket(), Key: key }),
+    );
+    if (!response.Body) throw new Error(`No body returned for storage key ${key}`);
+    return Buffer.from(await response.Body.transformToByteArray());
   }
 
   async delete(key: string): Promise<void> {

@@ -1,7 +1,7 @@
 import type {
   ClientToServerMessage,
-  DetectedError,
   ErrorCategory,
+  PersistedError,
   ServerToClientMessage,
 } from "@callie/types";
 import { useAuth } from "@clerk/react";
@@ -18,7 +18,7 @@ const CATEGORY_LABELS: Record<ErrorCategory, string> = {
 interface TurnCorrections {
   turnId: string;
   createdAt: string;
-  errors: DetectedError[];
+  errors: PersistedError[];
 }
 
 type SessionState =
@@ -34,13 +34,48 @@ type SessionState =
   | { status: "ended"; finalized: string[]; corrections: TurnCorrections[] }
   | { status: "error"; message: string };
 
-function CorrectionsPanel({ corrections }: { corrections: TurnCorrections[] }) {
+function getApiBaseUrl(): string {
+  return import.meta.env["VITE_API_URL"] ?? "";
+}
+
+/** Fetches an authenticated audio endpoint and plays the response, revoking the blob URL after. */
+async function fetchAndPlayAudio(path: string, token: string | null): Promise<void> {
+  const response = await fetch(`${getApiBaseUrl()}${path}`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (!response.ok) throw new Error(`Request to ${path} failed: ${response.status}`);
+  const objectUrl = URL.createObjectURL(await response.blob());
+  const audio = new Audio(objectUrl);
+  audio.addEventListener("ended", () => URL.revokeObjectURL(objectUrl), { once: true });
+  await audio.play();
+}
+
+function CorrectionsPanel({
+  corrections,
+  getToken,
+}: {
+  corrections: TurnCorrections[];
+  getToken: () => Promise<string | null>;
+}) {
+  const [playbackError, setPlaybackError] = useState<string | null>(null);
+
+  async function play(path: string): Promise<void> {
+    setPlaybackError(null);
+    try {
+      await fetchAndPlayAudio(path, await getToken());
+    } catch (error) {
+      console.error("Failed to play audio", error);
+      setPlaybackError("Couldn't play that audio.");
+    }
+  }
+
   return (
     <aside aria-label="Corrections">
+      {playbackError && <p role="alert">{playbackError}</p>}
       <ul>
         {corrections.flatMap((correction) =>
-          correction.errors.map((error, index) => (
-            <li key={`${correction.turnId}-${index}`}>
+          correction.errors.map((error) => (
+            <li key={error.id}>
               <time dateTime={correction.createdAt}>
                 {new Date(correction.createdAt).toLocaleTimeString()}
               </time>
@@ -49,6 +84,14 @@ function CorrectionsPanel({ corrections }: { corrections: TurnCorrections[] }) {
                 <span>{error.original}</span> → <span>{error.corrected}</span>
               </p>
               <p>{error.explanation}</p>
+              {error.hasClip && (
+                <button onClick={() => void play(`/api/errors/${error.id}/clip`)}>
+                  Play my clip
+                </button>
+              )}
+              <button onClick={() => void play(`/api/errors/${error.id}/target-audio`)}>
+                Play target
+              </button>
             </li>
           )),
         )}
@@ -58,8 +101,7 @@ function CorrectionsPanel({ corrections }: { corrections: TurnCorrections[] }) {
 }
 
 function buildSessionUrl(token: string | null): string {
-  const apiUrl = import.meta.env["VITE_API_URL"] ?? "";
-  const base = apiUrl || window.location.origin;
+  const base = getApiBaseUrl() || window.location.origin;
   const wsBase = base.replace(/^http/, "ws");
   return token
     ? `${wsBase}/api/session?token=${encodeURIComponent(token)}`
@@ -334,14 +376,14 @@ export function Session() {
           <button onClick={stopSession}>Stop session</button>
           {serverError && <p role="alert">{serverError}</p>}
           <p>{[...state.finalized, state.interim].filter(Boolean).join(" ")}</p>
-          <CorrectionsPanel corrections={state.corrections} />
+          <CorrectionsPanel corrections={state.corrections} getToken={getToken} />
         </>
       )}
       {state.status === "ended" && (
         <>
           <p>Session ended.</p>
           <p>{state.finalized.join(" ")}</p>
-          <CorrectionsPanel corrections={state.corrections} />
+          <CorrectionsPanel corrections={state.corrections} getToken={getToken} />
           <button onClick={() => void startSession()}>Start new session</button>
         </>
       )}

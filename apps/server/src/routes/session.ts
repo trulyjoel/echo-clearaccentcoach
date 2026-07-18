@@ -2,6 +2,7 @@ import type {
   ClientToServerMessage,
   DetectedError,
   L1,
+  PersistedError,
   ServerToClientMessage,
   SessionEndReason,
 } from "@callie/types";
@@ -49,6 +50,8 @@ function bridgeQueryToken(request: FastifyRequest): void {
 interface PersistedTurn {
   id: string;
   createdAt: Date;
+  /** `hasClip` is always false here — it's only known once `maybeStoreClip` runs afterward. */
+  errors: PersistedError[];
 }
 
 /** Persists a turn and its detected errors together in one transaction. */
@@ -64,25 +67,42 @@ async function persistTurn(
       .values({ sessionId, transcript, reply: replyText })
       .returning();
     if (!turn) throw new Error("Failed to insert turn record");
+    let persistedErrors: PersistedError[] = [];
     if (errors.length > 0) {
-      await tx.insert(turnErrors).values(errors.map((error) => ({ turnId: turn.id, ...error })));
+      const inserted = await tx
+        .insert(turnErrors)
+        .values(errors.map((error) => ({ turnId: turn.id, ...error })))
+        .returning();
+      persistedErrors = inserted.map((row) => ({
+        id: row.id,
+        category: row.category,
+        original: row.original,
+        corrected: row.corrected,
+        explanation: row.explanation,
+        hasClip: false,
+      }));
     }
-    return turn;
+    return { id: turn.id, createdAt: turn.createdAt, errors: persistedErrors };
   });
 }
 
-/** Uploads the turn's audio as a clip, best-effort — a failed upload shouldn't fail the turn. */
+/**
+ * Uploads the turn's audio as a clip, best-effort — a failed upload shouldn't fail the turn.
+ * Returns whether the upload succeeded, so callers know whether to advertise a clip as playable.
+ */
 async function maybeStoreClip(
   turn: PersistedTurn,
   audio: Buffer,
   shouldStore: boolean,
   log: FastifyBaseLogger,
-): Promise<void> {
-  if (!shouldStore) return;
+): Promise<boolean> {
+  if (!shouldStore) return false;
   try {
     await storeTurnClip(turn.id, audio);
+    return true;
   } catch (error) {
     log.error(error, "Failed to store audio clip");
+    return false;
   }
 }
 
@@ -223,14 +243,19 @@ export function registerSessionRoutes(app: FastifyInstance): void {
           // The consent check above already guarantees consent for every session that reaches
           // here — `hasConsent` is defense-in-depth against that gate ever changing.
           const hasErrors = errors.length > 0;
-          await maybeStoreClip(persistedTurn, audio, hasErrors && hasConsent, request.log);
+          const hasClip = await maybeStoreClip(
+            persistedTurn,
+            audio,
+            hasErrors && hasConsent,
+            request.log,
+          );
           if (aborted()) return;
           if (hasErrors) {
             send({
               type: "turn_errors",
               turnId: persistedTurn.id,
               createdAt: persistedTurn.createdAt.toISOString(),
-              errors,
+              errors: persistedTurn.errors.map((error) => ({ ...error, hasClip })),
             });
           }
           send({ type: "reply_text", text: replyText });
