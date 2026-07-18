@@ -31,8 +31,31 @@ type SessionState =
       interim: string;
       corrections: TurnCorrections[];
     }
-  | { status: "ended"; finalized: string[] }
+  | { status: "ended"; finalized: string[]; corrections: TurnCorrections[] }
   | { status: "error"; message: string };
+
+function CorrectionsPanel({ corrections }: { corrections: TurnCorrections[] }) {
+  return (
+    <aside aria-label="Corrections">
+      <ul>
+        {corrections.flatMap((correction) =>
+          correction.errors.map((error, index) => (
+            <li key={`${correction.turnId}-${index}`}>
+              <time dateTime={correction.createdAt}>
+                {new Date(correction.createdAt).toLocaleTimeString()}
+              </time>
+              <strong>{CATEGORY_LABELS[error.category]}</strong>
+              <p>
+                <span>{error.original}</span> → <span>{error.corrected}</span>
+              </p>
+              <p>{error.explanation}</p>
+            </li>
+          )),
+        )}
+      </ul>
+    </aside>
+  );
+}
 
 function buildSessionUrl(token: string | null): string {
   const apiUrl = import.meta.env["VITE_API_URL"] ?? "";
@@ -84,7 +107,7 @@ export function Session() {
           return;
         case "turn_errors":
           setState((prev) => {
-            if (prev.status !== "active") return prev;
+            if (prev.status !== "active" && prev.status !== "ended") return prev;
             const correction: TurnCorrections = {
               turnId: message.turnId,
               createdAt: message.createdAt,
@@ -132,6 +155,7 @@ export function Session() {
           setState((prev) => ({
             status: "ended",
             finalized: prev.status === "active" ? prev.finalized : [],
+            corrections: prev.status === "active" ? prev.corrections : [],
           }));
           return;
         case "error":
@@ -219,30 +243,14 @@ export function Session() {
           <button onClick={stopSession}>Stop session</button>
           {serverError && <p role="alert">{serverError}</p>}
           <p>{[...state.finalized, state.interim].filter(Boolean).join(" ")}</p>
-          <aside aria-label="Corrections">
-            <ul>
-              {state.corrections.flatMap((correction) =>
-                correction.errors.map((error, index) => (
-                  <li key={`${correction.turnId}-${index}`}>
-                    <time dateTime={correction.createdAt}>
-                      {new Date(correction.createdAt).toLocaleTimeString()}
-                    </time>
-                    <strong>{CATEGORY_LABELS[error.category]}</strong>
-                    <p>
-                      <span>{error.original}</span> → <span>{error.corrected}</span>
-                    </p>
-                    <p>{error.explanation}</p>
-                  </li>
-                )),
-              )}
-            </ul>
-          </aside>
+          <CorrectionsPanel corrections={state.corrections} />
         </>
       )}
       {state.status === "ended" && (
         <>
           <p>Session ended.</p>
           <p>{state.finalized.join(" ")}</p>
+          <CorrectionsPanel corrections={state.corrections} />
           <button onClick={() => void startSession()}>Start new session</button>
         </>
       )}

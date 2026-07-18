@@ -368,6 +368,62 @@ describe("Session", () => {
     expect(screen.getByText("I saw dog")).toBeInTheDocument();
   });
 
+  it("keeps the correction panel visible after the session ends", async () => {
+    const { ws } = await startAndOpenSession();
+
+    ws.emitServerMessage({
+      type: "turn_errors",
+      turnId: "turn-1",
+      createdAt: "2026-07-18T12:00:00.000Z",
+      errors: [
+        {
+          category: "preposition_choice",
+          original: "arrive to the station",
+          corrected: "arrive at the station",
+          explanation: "Use 'at' for a specific point of arrival.",
+        },
+      ],
+    });
+    await screen.findByText("arrive to the station");
+
+    await userEvent.setup().click(screen.getByRole("button", { name: "Stop session" }));
+    ws.emitServerMessage({ type: "session_ended", reason: "user_ended" });
+
+    await waitFor(() => {
+      expect(screen.getByText("Session ended.")).toBeInTheDocument();
+    });
+    expect(screen.getByText("arrive to the station")).toBeInTheDocument();
+    expect(screen.getByText("arrive at the station")).toBeInTheDocument();
+  });
+
+  it("still appends a turn_errors frame that arrives after the session has ended", async () => {
+    const { ws } = await startAndOpenSession();
+
+    await userEvent.setup().click(screen.getByRole("button", { name: "Stop session" }));
+    ws.emitServerMessage({ type: "session_ended", reason: "user_ended" });
+    await waitFor(() => {
+      expect(screen.getByText("Session ended.")).toBeInTheDocument();
+    });
+
+    ws.emitServerMessage({
+      type: "turn_errors",
+      turnId: "turn-1",
+      createdAt: "2026-07-18T12:00:00.000Z",
+      errors: [
+        {
+          category: "verb_tense_aspect",
+          original: "I am go",
+          corrected: "I am going",
+          explanation: "Use the -ing form after 'am' for the present continuous.",
+        },
+      ],
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("I am go")).toBeInTheDocument();
+    });
+  });
+
   it("stops playing reply audio and clears the buffer on a server barge-in signal", async () => {
     const { ws } = await startAndOpenSession();
 
