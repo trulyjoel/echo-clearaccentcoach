@@ -27,6 +27,12 @@ createdb callie_test
 # set DATABASE_URL in apps/server/.env to point at callie_dev, e.g.
 #   DATABASE_URL=postgresql://<you>@localhost:5432/callie_dev
 # and apps/server/.env.test (gitignored) to point at callie_test
+#
+# apps/server/.env.test also needs CLERK_PUBLISHABLE_KEY / CLERK_SECRET_KEY so the real
+# clerkPlugin can initialize in app.test.ts (routes/session.test.ts mocks Clerk away, but
+# app.test.ts doesn't) — any syntactically valid test-mode key works, e.g.:
+#   CLERK_PUBLISHABLE_KEY=pk_test_dGVzdC5jbGVyay5hY2NvdW50cy5kZXYk
+#   CLERK_SECRET_KEY=sk_test_0000000000000000000000000000000000000000
 pnpm --filter @callie/server db:migrate
 
 pnpm dev          # runs the server (http://localhost:3000) and web app (http://localhost:5173) together

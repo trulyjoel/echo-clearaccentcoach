@@ -15,7 +15,9 @@ export function buildApp(): FastifyInstance {
   app.get("/health", async () => ({ status: "ok" }));
 
   app.register(async (apiApp) => {
-    apiApp.register(clerkPlugin);
+    // onRequest so this runs before any route's own auth hook, including preValidation hooks
+    // like the session route's (preValidation fires before Fastify's default preHandler hook).
+    apiApp.register(clerkPlugin, { hookName: "onRequest" });
     registerAuthRoutes(apiApp);
     registerOnboardingRoutes(apiApp);
     registerSessionRoutes(apiApp);
