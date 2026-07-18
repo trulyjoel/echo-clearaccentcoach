@@ -1,20 +1,36 @@
 import { createAnthropic } from "@ai-sdk/anthropic";
 import type { AnthropicProvider } from "@ai-sdk/anthropic";
+import type { DetectedError, L1, SupportedL1 } from "@callie/types";
+import { ERROR_CATEGORIES } from "@callie/types";
 import { generateObject, generateText } from "ai";
 import { z } from "zod";
-import type { DetectedError } from "./errorTaxonomy.js";
-import { ERROR_CATEGORIES } from "./errorTaxonomy.js";
+import { L1_INTERFERENCE_HINTS } from "./l1Hints.js";
 
 export interface ConversationMessage {
   role: "user" | "assistant";
   content: string;
 }
 
+export interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+}
+
+export interface AnalysisResult {
+  errors: DetectedError[];
+  usage: TokenUsage;
+}
+
+export interface ReplyResult {
+  text: string;
+  usage: TokenUsage;
+}
+
 export interface LLMProvider {
-  /** Pass 1: tags a turn's transcript with grammar errors across the generic taxonomy. */
-  analyzeErrors(transcript: string): Promise<DetectedError[]>;
+  /** Pass 1: tags a turn's transcript with grammar errors, biased by the learner's L1. */
+  analyzeErrors(transcript: string, l1: L1): Promise<AnalysisResult>;
   /** Pass 2: generates a reply, weaving in a correction for the most relevant error, if any. */
-  generateReply(history: ConversationMessage[], errors: DetectedError[]): Promise<string>;
+  generateReply(history: ConversationMessage[], errors: DetectedError[]): Promise<ReplyResult>;
 }
 
 const CALLIE_SYSTEM_PROMPT =
@@ -28,6 +44,21 @@ const ANALYSIS_SYSTEM_PROMPT =
   `${ERROR_CATEGORIES.join(", ")}. For each error, give the original text, the corrected ` +
   "text, and a brief explanation aimed at the learner. Only flag genuine errors — return an " +
   "empty list if the utterance is grammatically correct.";
+
+function isSupportedL1(l1: L1): l1 is SupportedL1 {
+  return l1 !== "other";
+}
+
+/** Builds pass 1's system prompt, biased toward the learner's L1 interference patterns. */
+export function buildAnalysisSystemPrompt(l1: L1): string {
+  if (!isSupportedL1(l1)) return ANALYSIS_SYSTEM_PROMPT;
+  return (
+    `${ANALYSIS_SYSTEM_PROMPT}\n\n` +
+    `The learner's native language is ${l1}. Bias your detection toward interference patterns ` +
+    `known to be common for ${l1} speakers: ${L1_INTERFERENCE_HINTS[l1]} These hints inform ` +
+    "detection — keep categorizing every detected error using only the five categories above."
+  );
+}
 
 const errorAnalysisSchema = z.object({
   errors: z.array(
@@ -81,24 +112,34 @@ function getClient(): AnthropicProvider {
   return client;
 }
 
+function toTokenUsage(usage: {
+  inputTokens: number | undefined;
+  outputTokens: number | undefined;
+}): TokenUsage {
+  return { inputTokens: usage.inputTokens ?? 0, outputTokens: usage.outputTokens ?? 0 };
+}
+
 class AnthropicLLMProvider implements LLMProvider {
-  async analyzeErrors(transcript: string): Promise<DetectedError[]> {
-    const { object } = await generateObject({
+  async analyzeErrors(transcript: string, l1: L1): Promise<AnalysisResult> {
+    const { object, usage } = await generateObject({
       model: getClient()(getModelId()),
       schema: errorAnalysisSchema,
-      system: ANALYSIS_SYSTEM_PROMPT,
+      system: buildAnalysisSystemPrompt(l1),
       prompt: transcript,
     });
-    return object.errors;
+    return { errors: object.errors, usage: toTokenUsage(usage) };
   }
 
-  async generateReply(history: ConversationMessage[], errors: DetectedError[]): Promise<string> {
-    const { text } = await generateText({
+  async generateReply(
+    history: ConversationMessage[],
+    errors: DetectedError[],
+  ): Promise<ReplyResult> {
+    const { text, usage } = await generateText({
       model: getClient()(getModelId()),
       system: buildReplySystemPrompt(errors),
       messages: history,
     });
-    return text;
+    return { text, usage: toTokenUsage(usage) };
   }
 }
 

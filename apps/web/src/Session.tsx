@@ -1,11 +1,36 @@
-import type { ClientToServerMessage, ServerToClientMessage } from "@callie/types";
+import type {
+  ClientToServerMessage,
+  DetectedError,
+  ErrorCategory,
+  ServerToClientMessage,
+} from "@callie/types";
 import { useAuth } from "@clerk/react";
 import { useCallback, useEffect, useRef, useState } from "react";
+
+const CATEGORY_LABELS: Record<ErrorCategory, string> = {
+  word_order: "Word order",
+  verb_tense_aspect: "Verb tense/aspect",
+  subject_verb_agreement: "Subject-verb agreement",
+  article_usage: "Article usage",
+  preposition_choice: "Preposition choice",
+};
+
+interface TurnCorrections {
+  turnId: string;
+  createdAt: string;
+  errors: DetectedError[];
+}
 
 type SessionState =
   | { status: "idle" }
   | { status: "starting" }
-  | { status: "active"; sessionId: string; finalized: string[]; interim: string }
+  | {
+      status: "active";
+      sessionId: string;
+      finalized: string[];
+      interim: string;
+      corrections: TurnCorrections[];
+    }
   | { status: "ended"; finalized: string[] }
   | { status: "error"; message: string };
 
@@ -39,7 +64,13 @@ export function Session() {
     (message: ServerToClientMessage) => {
       switch (message.type) {
         case "session_started":
-          setState({ status: "active", sessionId: message.sessionId, finalized: [], interim: "" });
+          setState({
+            status: "active",
+            sessionId: message.sessionId,
+            finalized: [],
+            interim: "",
+            corrections: [],
+          });
           return;
         case "transcript":
           setState((prev) => {
@@ -50,6 +81,17 @@ export function Session() {
           });
           return;
         case "end_of_turn":
+          return;
+        case "turn_errors":
+          setState((prev) => {
+            if (prev.status !== "active") return prev;
+            const correction: TurnCorrections = {
+              turnId: message.turnId,
+              createdAt: message.createdAt,
+              errors: message.errors,
+            };
+            return { ...prev, corrections: [...prev.corrections, correction] };
+          });
           return;
         case "reply_text":
           replyAudioChunksRef.current = [];
@@ -170,6 +212,24 @@ export function Session() {
           <button onClick={stopSession}>Stop session</button>
           {serverError && <p role="alert">{serverError}</p>}
           <p>{[...state.finalized, state.interim].filter(Boolean).join(" ")}</p>
+          <aside aria-label="Corrections">
+            <ul>
+              {state.corrections.flatMap((correction) =>
+                correction.errors.map((error, index) => (
+                  <li key={`${correction.turnId}-${index}`}>
+                    <time dateTime={correction.createdAt}>
+                      {new Date(correction.createdAt).toLocaleTimeString()}
+                    </time>
+                    <strong>{CATEGORY_LABELS[error.category]}</strong>
+                    <p>
+                      <span>{error.original}</span> → <span>{error.corrected}</span>
+                    </p>
+                    <p>{error.explanation}</p>
+                  </li>
+                )),
+              )}
+            </ul>
+          </aside>
         </>
       )}
       {state.status === "ended" && (

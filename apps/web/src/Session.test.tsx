@@ -276,6 +276,80 @@ describe("Session", () => {
     expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:fake-url");
   });
 
+  it("renders a turn's detected errors in the correction panel", async () => {
+    const { ws } = await startAndOpenSession();
+
+    ws.emitServerMessage({
+      type: "turn_errors",
+      turnId: "turn-1",
+      createdAt: "2026-07-18T12:00:00.000Z",
+      errors: [
+        {
+          category: "subject_verb_agreement",
+          original: "she go",
+          corrected: "she goes",
+          explanation: "Third-person singular verbs take an -s ending.",
+        },
+      ],
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("she go")).toBeInTheDocument();
+    });
+    expect(screen.getByText("she goes")).toBeInTheDocument();
+    expect(screen.getByText("Third-person singular verbs take an -s ending.")).toBeInTheDocument();
+    expect(screen.getByText("Subject-verb agreement")).toBeInTheDocument();
+  });
+
+  it("does not add a panel entry for a turn with no detected errors", async () => {
+    const { ws } = await startAndOpenSession();
+
+    ws.emitServerMessage({ type: "reply_text", text: "Nice job!" });
+    ws.emitServerMessage({ type: "reply_audio_end" });
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Stop session" })).toBeInTheDocument();
+    });
+    expect(screen.queryByRole("listitem")).not.toBeInTheDocument();
+  });
+
+  it("associates each panel entry with the turn it came from", async () => {
+    const { ws } = await startAndOpenSession();
+
+    ws.emitServerMessage({
+      type: "turn_errors",
+      turnId: "turn-1",
+      createdAt: "2026-07-18T12:00:00.000Z",
+      errors: [
+        {
+          category: "word_order",
+          original: "go I",
+          corrected: "I go",
+          explanation: "Subject comes before the verb in English statements.",
+        },
+      ],
+    });
+    ws.emitServerMessage({
+      type: "turn_errors",
+      turnId: "turn-2",
+      createdAt: "2026-07-18T12:01:00.000Z",
+      errors: [
+        {
+          category: "article_usage",
+          original: "I saw dog",
+          corrected: "I saw a dog",
+          explanation: "Singular countable nouns need an article.",
+        },
+      ],
+    });
+
+    await waitFor(() => {
+      expect(screen.getAllByRole("listitem")).toHaveLength(2);
+    });
+    expect(screen.getByText("go I")).toBeInTheDocument();
+    expect(screen.getByText("I saw dog")).toBeInTheDocument();
+  });
+
   it("stops playing reply audio and clears the buffer on a server barge-in signal", async () => {
     const { ws } = await startAndOpenSession();
 

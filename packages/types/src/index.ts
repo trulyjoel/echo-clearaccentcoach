@@ -21,9 +21,27 @@ export interface OnboardingRequest {
   consent: boolean;
 }
 
-export const SESSION_END_REASONS = ["user_ended", "disconnected", "error"] as const;
+export const SESSION_END_REASONS = ["user_ended", "disconnected", "error", "max_duration"] as const;
 
 export type SessionEndReason = (typeof SESSION_END_REASONS)[number];
+
+/** The generic (non-L1-specific) error taxonomy pass 1 tags each detected error with. */
+export const ERROR_CATEGORIES = [
+  "word_order",
+  "verb_tense_aspect",
+  "subject_verb_agreement",
+  "article_usage",
+  "preposition_choice",
+] as const;
+
+export type ErrorCategory = (typeof ERROR_CATEGORIES)[number];
+
+export interface DetectedError {
+  category: ErrorCategory;
+  original: string;
+  corrected: string;
+  explanation: string;
+}
 
 /**
  * Sent from server to client over the /api/session WebSocket.
@@ -39,6 +57,7 @@ export type ServerToClientMessage =
   | { type: "session_started"; sessionId: string }
   | { type: "transcript"; text: string; isFinal: boolean }
   | { type: "end_of_turn" }
+  | { type: "turn_errors"; turnId: string; createdAt: string; errors: DetectedError[] }
   | { type: "reply_text"; text: string }
   | { type: "reply_audio_end" }
   | { type: "reply_interrupted" }
@@ -53,6 +72,4 @@ export type ServerToClientMessage =
  * fails to start playing) — the server has no other way to know when audible playback ends,
  * since it only streams the audio bytes and has no visibility into client-side playback.
  */
-export type ClientToServerMessage =
-  | { type: "end_session" }
-  | { type: "reply_playback_ended" };
+export type ClientToServerMessage = { type: "end_session" } | { type: "reply_playback_ended" };

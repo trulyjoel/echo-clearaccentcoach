@@ -1,15 +1,30 @@
-import type { ClientToServerMessage, ServerToClientMessage, SessionEndReason } from "@callie/types";
+import type {
+  ClientToServerMessage,
+  DetectedError,
+  L1,
+  ServerToClientMessage,
+  SessionEndReason,
+} from "@callie/types";
 import { eq } from "drizzle-orm";
-import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import type { FastifyBaseLogger, FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { storeTurnClip } from "../audioClips.js";
 import { getAuthenticatedUserId } from "../auth.js";
 import { db } from "../db/client.js";
 import { profiles, sessions, turnErrors, turns } from "../db/schema.js";
 import type { DeepgramConnection } from "../deepgram.js";
 import { openDeepgramConnection } from "../deepgram.js";
-import type { DetectedError } from "../errorTaxonomy.js";
-import type { ConversationMessage } from "../llm.js";
+import type { AnalysisResult, ConversationMessage, ReplyResult } from "../llm.js";
 import { getLLMProvider } from "../llm.js";
+import { getMaxSessionDurationMs, hasReachedDailySessionCap } from "../sessionLimits.js";
 import { getTTSProvider } from "../tts.js";
+import { ensureUsageRecord, recordUsage } from "../usage.js";
+
+type Profile = typeof profiles.$inferSelect;
+
+/** `requireConsentedUser` stashes the profile row here so the handler doesn't re-query it. */
+interface RequestWithProfile extends FastifyRequest {
+  profile?: Profile;
+}
 
 /** Browsers can't set custom headers on a WebSocket handshake, so the client passes the Clerk token as a query param. */
 function bridgeQueryToken(request: FastifyRequest): void {
@@ -31,6 +46,54 @@ async function requireConsentedUser(request: FastifyRequest, reply: FastifyReply
   const [profile] = await db.select().from(profiles).where(eq(profiles.clerkUserId, userId));
   if (!profile?.l1 || !profile.consentGivenAt) {
     await reply.code(403).send({ error: "Recording consent required" });
+    return;
+  }
+
+  if (await hasReachedDailySessionCap(userId)) {
+    await reply.code(429).send({ error: "Daily session limit reached" });
+    return;
+  }
+
+  (request as RequestWithProfile).profile = profile;
+}
+
+interface PersistedTurn {
+  id: string;
+  createdAt: Date;
+}
+
+/** Persists a turn and its detected errors together in one transaction. */
+async function persistTurn(
+  sessionId: string,
+  transcript: string,
+  replyText: string,
+  errors: DetectedError[],
+): Promise<PersistedTurn> {
+  return db.transaction(async (tx) => {
+    const [turn] = await tx
+      .insert(turns)
+      .values({ sessionId, transcript, reply: replyText })
+      .returning();
+    if (!turn) throw new Error("Failed to insert turn record");
+    if (errors.length > 0) {
+      await tx.insert(turnErrors).values(errors.map((error) => ({ turnId: turn.id, ...error })));
+    }
+    return turn;
+  });
+}
+
+/** Uploads the turn's audio as a clip, best-effort — a failed upload shouldn't fail the turn. */
+async function maybeStoreClip(
+  turn: PersistedTurn,
+  audio: Buffer,
+  shouldStore: boolean,
+  log: FastifyBaseLogger,
+): Promise<void> {
+  if (!shouldStore) return;
+  try {
+    await storeTurnClip(turn.id, audio);
+  } catch (error) {
+    log.error(error, "Failed to store audio clip");
   }
 }
 
@@ -43,31 +106,47 @@ export function registerSessionRoutes(app: FastifyInstance): void {
         socket.send(JSON.stringify(message));
       }
 
-      // preValidation already confirmed the user is authenticated and consented.
+      // preValidation already confirmed the user is authenticated, consented, and under the
+      // daily session cap, and stashed the profile it looked up onto the request.
       const userId = getAuthenticatedUserId(request);
-      if (!userId) throw new Error("Unreachable: preValidation should have rejected this request");
+      const profile = (request as RequestWithProfile).profile;
+      if (!userId || !profile) {
+        throw new Error("Unreachable: preValidation should have rejected this request");
+      }
+      const l1: L1 = profile.l1 ?? "other";
+      const hasConsent = Boolean(profile.consentGivenAt);
 
       const [session] = await db.insert(sessions).values({ clerkUserId: userId }).returning();
       if (!session) throw new Error("Failed to insert session record");
       const sessionId = session.id;
+      const sessionStartedAt = session.startedAt;
+      await ensureUsageRecord(sessionId);
       send({ type: "session_started", sessionId });
 
       let deepgramConnection: DeepgramConnection | undefined;
       let ended = false;
+      const maxDurationTimer = setTimeout(() => {
+        void endSession("max_duration");
+      }, getMaxSessionDurationMs());
       async function endSession(reason: SessionEndReason): Promise<void> {
         if (ended) return;
         ended = true;
+        clearTimeout(maxDurationTimer);
         deepgramConnection?.close();
+        const endedAt = new Date();
         await db
           .update(sessions)
-          .set({ endedAt: new Date(), endReason: reason })
+          .set({ endedAt, endReason: reason })
           .where(eq(sessions.id, sessionId));
+        const durationSeconds = Math.round((endedAt.getTime() - sessionStartedAt.getTime()) / 1000);
+        await recordUsage(sessionId, { deepgramSeconds: durationSeconds });
         send({ type: "session_ended", reason });
         socket.close();
       }
 
       const conversationHistory: ConversationMessage[] = [];
       let turnTranscriptParts: string[] = [];
+      let turnAudioChunks: Buffer[] = [];
 
       /**
        * Tracks the turn whose LLM/TTS pipeline is currently running, so a subsequent confirmed
@@ -91,7 +170,7 @@ export function registerSessionRoutes(app: FastifyInstance): void {
       let replyPlaying = false;
 
       /** Runs the LLM reply + TTS pipeline for one finished user turn. */
-      async function handleTurn(transcript: string): Promise<void> {
+      async function handleTurn(transcript: string, audio: Buffer): Promise<void> {
         if (activeTurn) return;
         const myTurn: ActiveTurn = { interrupted: false };
         activeTurn = myTurn;
@@ -99,51 +178,66 @@ export function registerSessionRoutes(app: FastifyInstance): void {
         try {
           conversationHistory.push({ role: "user", content: transcript });
 
-          let errors: DetectedError[];
+          let analysis: AnalysisResult;
           try {
-            errors = await getLLMProvider().analyzeErrors(transcript);
+            analysis = await getLLMProvider().analyzeErrors(transcript, l1);
           } catch (error) {
             request.log.error(error, "Failed to analyze errors");
             if (!ended) send({ type: "error", message: "Could not analyze your speech" });
             return;
           }
+          const errors = analysis.errors;
           if (aborted()) return;
 
-          let replyText: string;
+          let reply: ReplyResult;
           try {
             // Pass a snapshot: conversationHistory keeps mutating (the assistant reply below,
             // future turns) after this call is made, and callers/tests may hold onto this array.
-            replyText = await getLLMProvider().generateReply([...conversationHistory], errors);
+            reply = await getLLMProvider().generateReply([...conversationHistory], errors);
           } catch (error) {
             request.log.error(error, "Failed to generate reply");
             if (!ended) send({ type: "error", message: "Could not generate a reply" });
             return;
           }
+          const replyText = reply.text;
+          // The vendor calls already ran and were billed regardless of what happens next
+          // (abort, persistence failure), so token usage is recorded unconditionally here.
+          await recordUsage(sessionId, {
+            analysisInputTokens: analysis.usage.inputTokens,
+            analysisOutputTokens: analysis.usage.outputTokens,
+            replyInputTokens: reply.usage.inputTokens,
+            replyOutputTokens: reply.usage.outputTokens,
+          });
           if (aborted()) return;
           conversationHistory.push({ role: "assistant", content: replyText });
 
+          let persistedTurn: PersistedTurn;
           try {
-            await db.transaction(async (tx) => {
-              const [turn] = await tx
-                .insert(turns)
-                .values({ sessionId, transcript, reply: replyText })
-                .returning();
-              if (!turn) throw new Error("Failed to insert turn record");
-              if (errors.length > 0) {
-                await tx
-                  .insert(turnErrors)
-                  .values(errors.map((error) => ({ turnId: turn.id, ...error })));
-              }
-            });
+            persistedTurn = await persistTurn(sessionId, transcript, replyText, errors);
           } catch (error) {
             request.log.error(error, "Failed to persist turn");
             if (!ended) send({ type: "error", message: "Could not save this turn" });
             return;
           }
+          // `requireConsentedUser` already guarantees consent for every session that reaches
+          // here — `profile.consentGivenAt` is defense-in-depth against that gate ever changing.
+          const hasErrors = errors.length > 0;
+          await maybeStoreClip(persistedTurn, audio, hasErrors && hasConsent, request.log);
           if (aborted()) return;
+          if (hasErrors) {
+            send({
+              type: "turn_errors",
+              turnId: persistedTurn.id,
+              createdAt: persistedTurn.createdAt.toISOString(),
+              errors,
+            });
+          }
           send({ type: "reply_text", text: replyText });
 
           try {
+            // Characters are billed by ElevenLabs as soon as the call is made, regardless of
+            // whether the resulting stream is fully consumed.
+            await recordUsage(sessionId, { elevenlabsCharacters: replyText.length });
             const audioChunks = await getTTSProvider().synthesize(replyText);
             for await (const chunk of audioChunks) {
               if (aborted()) return;
@@ -196,7 +290,9 @@ export function registerSessionRoutes(app: FastifyInstance): void {
           send({ type: "end_of_turn" });
           const turnTranscript = turnTranscriptParts.join(" ").trim();
           turnTranscriptParts = [];
-          if (turnTranscript) void handleTurn(turnTranscript);
+          const turnAudio = Buffer.concat(turnAudioChunks);
+          turnAudioChunks = [];
+          if (turnTranscript) void handleTurn(turnTranscript, turnAudio);
         }
       });
 
@@ -213,6 +309,7 @@ export function registerSessionRoutes(app: FastifyInstance): void {
       socket.on("message", (message: Buffer, isBinary: boolean) => {
         if (isBinary) {
           deepgramConnection.sendMedia(message);
+          turnAudioChunks.push(message);
           return;
         }
 

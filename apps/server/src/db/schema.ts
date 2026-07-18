@@ -1,6 +1,5 @@
-import { L1_VALUES, SESSION_END_REASONS } from "@callie/types";
-import { pgEnum, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
-import { ERROR_CATEGORIES } from "../errorTaxonomy.js";
+import { ERROR_CATEGORIES, L1_VALUES, SESSION_END_REASONS } from "@callie/types";
+import { boolean, integer, pgEnum, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
 
 export const l1Enum = pgEnum("l1", [...L1_VALUES]);
 
@@ -33,6 +32,15 @@ export const turns = pgTable("turns", {
 
 export const errorCategoryEnum = pgEnum("error_category", [...ERROR_CATEGORIES]);
 
+/** The short user-voice segment around a flagged error, stored Opus-compressed on Cloudflare R2. */
+export const audioClips = pgTable("audio_clips", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  storageKey: text("storage_key").notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  bookmarked: boolean("bookmarked").notNull().default(false),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
 export const turnErrors = pgTable("turn_errors", {
   id: uuid("id").primaryKey().defaultRandom(),
   turnId: uuid("turn_id")
@@ -42,5 +50,22 @@ export const turnErrors = pgTable("turn_errors", {
   original: text("original").notNull(),
   corrected: text("corrected").notNull(),
   explanation: text("explanation").notNull(),
+  audioClipId: uuid("audio_clip_id").references(() => audioClips.id, { onDelete: "set null" }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/** Per-session vendor usage/cost figures, recorded from day one for future billing/limits. */
+export const usageRecords = pgTable("usage_records", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  sessionId: uuid("session_id")
+    .notNull()
+    .unique()
+    .references(() => sessions.id),
+  deepgramSeconds: integer("deepgram_seconds").notNull().default(0),
+  elevenlabsCharacters: integer("elevenlabs_characters").notNull().default(0),
+  analysisInputTokens: integer("analysis_input_tokens").notNull().default(0),
+  analysisOutputTokens: integer("analysis_output_tokens").notNull().default(0),
+  replyInputTokens: integer("reply_input_tokens").notNull().default(0),
+  replyOutputTokens: integer("reply_output_tokens").notNull().default(0),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });

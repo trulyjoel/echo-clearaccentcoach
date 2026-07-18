@@ -51,3 +51,4 @@ minimumReleaseAgeExclude:
   - '@ai-sdk/gateway@4.0.23'
   - '@ai-sdk/provider-utils@5.0.11'
   - ai@7.0.31
+  - '@aws-sdk/client-s3@3.1090.0'

@@ -1,11 +1,10 @@
-import type { ServerToClientMessage } from "@callie/types";
+import type { DetectedError, L1, ServerToClientMessage } from "@callie/types";
 import { eq } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { db } from "../db/client.js";
-import { profiles, sessions, turnErrors, turns } from "../db/schema.js";
+import { audioClips, profiles, sessions, turnErrors, turns, usageRecords } from "../db/schema.js";
 import type { DeepgramConnection, DeepgramMessage } from "../deepgram.js";
-import type { DetectedError } from "../errorTaxonomy.js";
 import type { ConversationMessage } from "../llm.js";
 
 type InjectedWebSocket = Awaited<ReturnType<FastifyInstance["injectWS"]>>;
@@ -83,42 +82,67 @@ vi.mock("../deepgram.js", () => ({
   openDeepgramConnection: deepgramTestState.openDeepgramConnection,
 }));
 
+interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+}
+
 const llmTestState = vi.hoisted(() => {
-  let replyImpl: (history: ConversationMessage[], errors: DetectedError[]) => Promise<string> =
-    async () => "Nice job!";
-  let analyzeImpl: (transcript: string) => Promise<DetectedError[]> = async () => [];
+  const DEFAULT_ANALYZE_USAGE: TokenUsage = { inputTokens: 8, outputTokens: 2 };
+  const DEFAULT_REPLY_USAGE: TokenUsage = { inputTokens: 10, outputTokens: 5 };
+  let replyImpl: (
+    history: ConversationMessage[],
+    errors: DetectedError[],
+  ) => Promise<string> = async () => "Nice job!";
+  let analyzeImpl: (transcript: string, l1: L1) => Promise<DetectedError[]> = async () => [];
+  let analyzeUsage: TokenUsage = DEFAULT_ANALYZE_USAGE;
+  let replyUsage: TokenUsage = DEFAULT_REPLY_USAGE;
   const calls: ConversationMessage[][] = [];
   const replyErrorArgs: DetectedError[][] = [];
   const analyzeCalls: string[] = [];
+  const analyzeL1Calls: L1[] = [];
 
   return {
     reset: (): void => {
       replyImpl = async () => "Nice job!";
       analyzeImpl = async () => [];
+      analyzeUsage = DEFAULT_ANALYZE_USAGE;
+      replyUsage = DEFAULT_REPLY_USAGE;
       calls.length = 0;
       replyErrorArgs.length = 0;
       analyzeCalls.length = 0;
+      analyzeL1Calls.length = 0;
     },
     setReplyImpl: (
       fn: (history: ConversationMessage[], errors: DetectedError[]) => Promise<string>,
     ): void => {
       replyImpl = fn;
     },
-    setAnalyzeImpl: (fn: (transcript: string) => Promise<DetectedError[]>): void => {
+    setAnalyzeImpl: (fn: (transcript: string, l1: L1) => Promise<DetectedError[]>): void => {
       analyzeImpl = fn;
+    },
+    setAnalyzeUsage: (usage: TokenUsage): void => {
+      analyzeUsage = usage;
+    },
+    setReplyUsage: (usage: TokenUsage): void => {
+      replyUsage = usage;
     },
     getCalls: (): ConversationMessage[][] => calls,
     getReplyErrorArgs: (): DetectedError[][] => replyErrorArgs,
     getAnalyzeCalls: (): string[] => analyzeCalls,
+    getAnalyzeL1Calls: (): L1[] => analyzeL1Calls,
     getLLMProvider: vi.fn(() => ({
-      analyzeErrors: async (transcript: string) => {
+      analyzeErrors: async (transcript: string, l1: L1) => {
         analyzeCalls.push(transcript);
-        return analyzeImpl(transcript);
+        analyzeL1Calls.push(l1);
+        const errors = await analyzeImpl(transcript, l1);
+        return { errors, usage: analyzeUsage };
       },
       generateReply: async (history: ConversationMessage[], errors: DetectedError[]) => {
         calls.push(history);
         replyErrorArgs.push(errors);
-        return replyImpl(history, errors);
+        const text = await replyImpl(history, errors);
+        return { text, usage: replyUsage };
       },
     })),
   };
@@ -156,13 +180,32 @@ const ttsTestState = vi.hoisted(() => {
 
 vi.mock("../tts.js", () => ({ getTTSProvider: ttsTestState.getTTSProvider }));
 
+const storageTestState = vi.hoisted(() => {
+  const uploads: Array<{ key: string; data: Buffer; contentType: string }> = [];
+
+  return {
+    reset: (): void => {
+      uploads.length = 0;
+    },
+    getUploads: (): Array<{ key: string; data: Buffer; contentType: string }> => uploads,
+    getStorageProvider: vi.fn(() => ({
+      upload: async (key: string, data: Buffer, contentType: string) => {
+        uploads.push({ key, data, contentType });
+      },
+      delete: async () => {},
+    })),
+  };
+});
+
+vi.mock("../storage.js", () => ({ getStorageProvider: storageTestState.getStorageProvider }));
+
 // vitest hoists imports above vi.mock calls, so app.js must be imported after the mocks above are set up.
 const { buildApp } = await import("../app.js");
 
-async function giveConsent(): Promise<void> {
+async function giveConsent(l1: L1 = "spanish"): Promise<void> {
   await db
     .insert(profiles)
-    .values({ clerkUserId: "test-user-session-456", l1: "spanish", consentGivenAt: new Date() });
+    .values({ clerkUserId: "test-user-session-456", l1, consentGivenAt: new Date() });
 }
 
 /**
@@ -223,8 +266,11 @@ afterEach(async () => {
   deepgramTestState.setShouldFail(false);
   llmTestState.reset();
   ttsTestState.reset();
+  storageTestState.reset();
   await db.delete(turnErrors);
   await db.delete(turns);
+  await db.delete(usageRecords);
+  await db.delete(audioClips);
   await db.delete(sessions);
   await db.delete(profiles);
 });
@@ -689,7 +735,6 @@ describe("turn-based reply loop", () => {
     ws.terminate();
     await app.close();
   });
-
 });
 
 describe("two-pass correction pipeline", () => {
@@ -834,6 +879,414 @@ describe("two-pass correction pipeline", () => {
     const [row] = await db.select().from(sessions).where(eq(sessions.id, sessionId));
     expect(row?.endedAt).toBeNull();
     expect(await db.select().from(turns).where(eq(turns.sessionId, sessionId))).toHaveLength(0);
+
+    ws.terminate();
+    await app.close();
+  });
+});
+
+describe("correction text panel", () => {
+  function emitSpeechFinal(transcript: string): void {
+    deepgramTestState.getLatest()?.emitMessage({
+      type: "Results",
+      is_final: true,
+      speech_final: true,
+      channel: { alternatives: [{ transcript }] },
+    });
+  }
+
+  const sampleError: DetectedError = {
+    category: "subject_verb_agreement",
+    original: "she go",
+    corrected: "she goes",
+    explanation: "Third-person singular verbs take an -s ending.",
+  };
+
+  it("sends the turn's error list to the client before reply_text", async () => {
+    await giveConsent();
+    llmTestState.setAnalyzeImpl(async () => [sampleError]);
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    await queue.next(); // session_started
+
+    emitSpeechFinal("she go to school");
+    await queue.next(); // transcript
+    await queue.next(); // end_of_turn
+
+    const turnErrorsFrame = await queue.next();
+    expect(turnErrorsFrame).toEqual({
+      kind: "json",
+      message: {
+        type: "turn_errors",
+        turnId: expect.any(String),
+        createdAt: expect.any(String),
+        errors: [sampleError],
+      },
+    });
+
+    expect(await queue.next()).toEqual({
+      kind: "json",
+      message: { type: "reply_text", text: "Nice job!" },
+    });
+
+    ws.terminate();
+    await app.close();
+  });
+
+  it("sends no turn_errors message when a turn has no detected errors", async () => {
+    await giveConsent();
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    await queue.next(); // session_started
+
+    emitSpeechFinal("hello Callie");
+    await queue.next(); // transcript
+    await queue.next(); // end_of_turn
+
+    // Straight to reply_text — no turn_errors frame in between.
+    expect(await queue.next()).toEqual({
+      kind: "json",
+      message: { type: "reply_text", text: "Nice job!" },
+    });
+
+    ws.terminate();
+    await app.close();
+  });
+});
+
+describe("L1-driven interference hints", () => {
+  function emitSpeechFinal(transcript: string): void {
+    deepgramTestState.getLatest()?.emitMessage({
+      type: "Results",
+      is_final: true,
+      speech_final: true,
+      channel: { alternatives: [{ transcript }] },
+    });
+  }
+
+  /** Drains one turn: transcript, end_of_turn, reply_text, 2 audio chunks, audio_end. */
+  async function drainOneTurn(queue: { next: () => Promise<QueuedFrame> }): Promise<void> {
+    for (let i = 0; i < 6; i++) await queue.next();
+  }
+
+  it("passes the user's stored L1 to analyzeErrors", async () => {
+    await giveConsent("mandarin");
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    await queue.next(); // session_started
+
+    emitSpeechFinal("she go to school");
+    await drainOneTurn(queue);
+
+    expect(llmTestState.getAnalyzeL1Calls()).toEqual(["mandarin"]);
+
+    ws.terminate();
+    await app.close();
+  });
+
+  it('passes "other" to analyzeErrors for a user with no L1-specific hints', async () => {
+    await giveConsent("other");
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    await queue.next(); // session_started
+
+    emitSpeechFinal("she go to school");
+    await drainOneTurn(queue);
+
+    expect(llmTestState.getAnalyzeL1Calls()).toEqual(["other"]);
+
+    ws.terminate();
+    await app.close();
+  });
+});
+
+describe("session limits", () => {
+  afterEach(() => {
+    delete process.env["DAILY_SESSION_CAP"];
+    delete process.env["MAX_SESSION_DURATION_MINUTES"];
+  });
+
+  it("rejects starting a new session once the daily session cap is reached", async () => {
+    await giveConsent();
+    process.env["DAILY_SESSION_CAP"] = "1";
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    await messageQueue(ws).next(); // session_started
+    ws.terminate();
+
+    await expect(
+      app.injectWS("/api/session", { headers: { authorization: "Bearer test-user-session-456" } }),
+    ).rejects.toThrow(/429/);
+
+    await app.close();
+  });
+
+  it("automatically ends an active session with reason max_duration once it hits the limit", async () => {
+    await giveConsent();
+    process.env["MAX_SESSION_DURATION_MINUTES"] = "0.0005"; // 30ms
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = messageQueue(ws);
+    const { sessionId } = (await queue.next()) as { type: "session_started"; sessionId: string };
+
+    expect(await queue.next()).toEqual({ type: "session_ended", reason: "max_duration" });
+
+    const [row] = await db.select().from(sessions).where(eq(sessions.id, sessionId));
+    expect(row?.endReason).toBe("max_duration");
+    expect(row?.endedAt).not.toBeNull();
+
+    await app.close();
+  });
+});
+
+describe("usage metering", () => {
+  function emitSpeechFinal(transcript: string): void {
+    deepgramTestState.getLatest()?.emitMessage({
+      type: "Results",
+      is_final: true,
+      speech_final: true,
+      channel: { alternatives: [{ transcript }] },
+    });
+  }
+
+  it("records LLM token usage and ElevenLabs characters synthesized for a turn", async () => {
+    await giveConsent();
+    llmTestState.setAnalyzeUsage({ inputTokens: 20, outputTokens: 4 });
+    llmTestState.setReplyUsage({ inputTokens: 30, outputTokens: 12 });
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    const started = (await queue.next()) as {
+      kind: "json";
+      message: { type: "session_started"; sessionId: string };
+    };
+    const sessionId = started.message.sessionId;
+
+    emitSpeechFinal("hello Callie");
+    await queue.next(); // transcript
+    await queue.next(); // end_of_turn
+    await queue.next(); // reply_text
+    await queue.next(); // audio chunk
+    await queue.next(); // audio chunk
+    await queue.next(); // reply_audio_end
+
+    const [usage] = await db
+      .select()
+      .from(usageRecords)
+      .where(eq(usageRecords.sessionId, sessionId));
+    expect(usage).toMatchObject({
+      analysisInputTokens: 20,
+      analysisOutputTokens: 4,
+      replyInputTokens: 30,
+      replyOutputTokens: 12,
+      elevenlabsCharacters: "Nice job!".length,
+    });
+
+    ws.terminate();
+    await app.close();
+  });
+
+  it("accumulates usage across multiple turns in the same session", async () => {
+    await giveConsent();
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    const started = (await queue.next()) as {
+      kind: "json";
+      message: { type: "session_started"; sessionId: string };
+    };
+    const sessionId = started.message.sessionId;
+
+    for (let i = 0; i < 2; i++) {
+      emitSpeechFinal("hello Callie");
+      for (let j = 0; j < 6; j++) await queue.next();
+    }
+
+    const [usage] = await db
+      .select()
+      .from(usageRecords)
+      .where(eq(usageRecords.sessionId, sessionId));
+    expect(usage?.analysisInputTokens).toBe(16);
+    expect(usage?.replyInputTokens).toBe(20);
+    expect(usage?.elevenlabsCharacters).toBe(2 * "Nice job!".length);
+
+    ws.terminate();
+    await app.close();
+  });
+
+  it("records elapsed session duration as deepgram seconds when the session ends", async () => {
+    await giveConsent();
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = messageQueue(ws);
+    const { sessionId } = (await queue.next()) as { type: "session_started"; sessionId: string };
+
+    ws.send(JSON.stringify({ type: "end_session" }));
+    await queue.next(); // session_ended
+
+    const [usage] = await db
+      .select()
+      .from(usageRecords)
+      .where(eq(usageRecords.sessionId, sessionId));
+    expect(usage?.deepgramSeconds).toBeGreaterThanOrEqual(0);
+
+    await app.close();
+  });
+});
+
+describe("audio clip capture + storage", () => {
+  function emitSpeechFinal(transcript: string): void {
+    deepgramTestState.getLatest()?.emitMessage({
+      type: "Results",
+      is_final: true,
+      speech_final: true,
+      channel: { alternatives: [{ transcript }] },
+    });
+  }
+
+  const sampleError: DetectedError = {
+    category: "subject_verb_agreement",
+    original: "she go",
+    corrected: "she goes",
+    explanation: "Third-person singular verbs take an -s ending.",
+  };
+
+  it("uploads the turn's audio as one clip and links it to every detected error", async () => {
+    await giveConsent();
+    llmTestState.setAnalyzeImpl(async () => [sampleError]);
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    const started = (await queue.next()) as {
+      kind: "json";
+      message: { type: "session_started"; sessionId: string };
+    };
+    const sessionId = started.message.sessionId;
+
+    ws.send(Buffer.from([1, 2, 3]));
+    ws.send(Buffer.from([4, 5]));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    emitSpeechFinal("she go to school");
+    await queue.next(); // transcript
+    await queue.next(); // end_of_turn
+    await queue.next(); // turn_errors
+    await queue.next(); // reply_text
+    await queue.next(); // audio chunk
+    await queue.next(); // audio chunk
+    await queue.next(); // reply_audio_end
+
+    const uploads = storageTestState.getUploads();
+    expect(uploads).toHaveLength(1);
+    expect(uploads[0]?.data).toEqual(Buffer.from([1, 2, 3, 4, 5]));
+    expect(uploads[0]?.contentType).toBe("audio/webm");
+
+    const [turn] = await db.select().from(turns).where(eq(turns.sessionId, sessionId));
+    const rows = await db.select().from(turnErrors).where(eq(turnErrors.turnId, turn!.id));
+    expect(rows[0]?.audioClipId).toBeTypeOf("string");
+
+    ws.terminate();
+    await app.close();
+  });
+
+  it("does not upload a clip for a turn with no detected errors", async () => {
+    await giveConsent();
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    await queue.next(); // session_started
+
+    ws.send(Buffer.from([1, 2, 3]));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    emitSpeechFinal("hello Callie");
+    await queue.next(); // transcript
+    await queue.next(); // end_of_turn
+    await queue.next(); // reply_text
+    await queue.next(); // audio chunk
+    await queue.next(); // audio chunk
+    await queue.next(); // reply_audio_end
+
+    expect(storageTestState.getUploads()).toHaveLength(0);
+
+    ws.terminate();
+    await app.close();
+  });
+
+  it("resets the audio buffer between turns", async () => {
+    await giveConsent();
+    llmTestState.setAnalyzeImpl(async () => [sampleError]);
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    await queue.next(); // session_started
+
+    ws.send(Buffer.from([1]));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    emitSpeechFinal("first turn");
+    for (let i = 0; i < 7; i++) await queue.next();
+
+    ws.send(Buffer.from([2]));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    emitSpeechFinal("second turn");
+    for (let i = 0; i < 7; i++) await queue.next();
+
+    const uploads = storageTestState.getUploads();
+    expect(uploads).toHaveLength(2);
+    expect(uploads[0]?.data).toEqual(Buffer.from([1]));
+    expect(uploads[1]?.data).toEqual(Buffer.from([2]));
 
     ws.terminate();
     await app.close();

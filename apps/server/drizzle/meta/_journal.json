@@ -29,6 +29,20 @@
       "when": 1784342734727,
       "tag": "0003_puzzling_morgan_stark",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1784379080883,
+      "tag": "0004_lethal_clea",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1784379560208,
+      "tag": "0005_daily_the_captain",
+      "breakpoints": true
     }
   ]
 }
