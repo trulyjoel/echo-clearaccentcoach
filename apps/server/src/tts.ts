@@ -31,7 +31,7 @@ class ElevenLabsTTSProvider implements TTSProvider {
   async synthesize(text: string): Promise<AsyncIterable<Uint8Array>> {
     return getClient().textToSpeech.stream(getVoiceId(), {
       text,
-      modelId: "eleven_multilingual_v2",
+      modelId: "eleven_flash_v2_5",
       outputFormat: "mp3_44100_128",
     });
   }
