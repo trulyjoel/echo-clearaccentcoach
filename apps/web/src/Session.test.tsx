@@ -94,6 +94,73 @@ class FakeAudio {
   }
 }
 
+class FakeSourceBuffer {
+  appended: ArrayBuffer[] = [];
+  updating = false;
+  private readonly listeners: Record<string, Array<() => void>> = {};
+
+  addEventListener(event: string, listener: () => void, options?: { once?: boolean }): void {
+    const wrapped = options?.once
+      ? () => {
+          this.removeEventListener(event, wrapped);
+          listener();
+        }
+      : listener;
+    (this.listeners[event] ??= []).push(wrapped);
+  }
+
+  removeEventListener(event: string, listener: () => void): void {
+    this.listeners[event] = (this.listeners[event] ?? []).filter((l) => l !== listener);
+  }
+
+  appendBuffer(buffer: ArrayBuffer): void {
+    this.appended.push(buffer);
+    this.updating = true;
+    queueMicrotask(() => {
+      this.updating = false;
+      for (const listener of this.listeners["updateend"] ?? []) listener();
+    });
+  }
+
+  /** Decodes every chunk appended so far back to text, in arrival order. */
+  appendedText(): string {
+    return this.appended.map((buffer) => new TextDecoder().decode(buffer)).join("");
+  }
+}
+
+class FakeMediaSource {
+  static instances: FakeMediaSource[] = [];
+  readyState: "closed" | "open" | "ended" = "closed";
+  sourceBuffers: FakeSourceBuffer[] = [];
+  endOfStreamCalled = false;
+  private readonly listeners: Record<string, Array<() => void>> = {};
+
+  constructor() {
+    FakeMediaSource.instances.push(this);
+  }
+
+  addEventListener(event: string, listener: () => void): void {
+    (this.listeners[event] ??= []).push(listener);
+  }
+
+  addSourceBuffer(_mimeType: string): FakeSourceBuffer {
+    const sourceBuffer = new FakeSourceBuffer();
+    this.sourceBuffers.push(sourceBuffer);
+    return sourceBuffer;
+  }
+
+  endOfStream(): void {
+    this.endOfStreamCalled = true;
+    this.readyState = "ended";
+  }
+
+  /** Test helper simulating the browser firing `sourceopen` once the src is attached. */
+  open(): void {
+    this.readyState = "open";
+    for (const listener of this.listeners["sourceopen"] ?? []) listener();
+  }
+}
+
 const fakeTrack = { stop: vi.fn() };
 const fakeStream = { getTracks: () => [fakeTrack] } as unknown as MediaStream;
 const getUserMedia = vi.fn().mockResolvedValue(fakeStream);
@@ -124,11 +191,13 @@ describe("Session", () => {
     FakeMediaRecorder.instances = [];
     FakeWebSocket.instances = [];
     FakeAudio.instances = [];
+    FakeMediaSource.instances = [];
     getUserMedia.mockClear().mockResolvedValue(fakeStream);
     fakeTrack.stop.mockClear();
     vi.stubGlobal("MediaRecorder", FakeMediaRecorder);
     vi.stubGlobal("WebSocket", FakeWebSocket);
     vi.stubGlobal("Audio", FakeAudio);
+    vi.stubGlobal("MediaSource", FakeMediaSource);
     URL.createObjectURL = vi.fn(() => "blob:fake-url");
     URL.revokeObjectURL = vi.fn();
     Object.defineProperty(navigator, "mediaDevices", {
@@ -260,29 +329,86 @@ describe("Session", () => {
     expect(screen.getByRole("button", { name: "Stop session" })).toBeInTheDocument();
   });
 
-  it("plays the streamed reply audio automatically once reply_audio_end arrives", async () => {
+  it("starts playing the reply's audio element as soon as reply_text arrives", async () => {
     const { ws } = await startAndOpenSession();
 
     ws.emitServerMessage({ type: "reply_text", text: "Nice job!" });
-    ws.emitBinaryMessage(new Blob(["chunk-one"]));
-    ws.emitBinaryMessage(new Blob(["chunk-two"]));
-    ws.emitServerMessage({ type: "reply_audio_end" });
 
     await waitFor(() => {
       expect(FakeAudio.instances).toHaveLength(1);
     });
     expect(FakeAudio.instances[0]?.played).toBe(true);
     expect(FakeAudio.instances[0]?.src).toBe("blob:fake-url");
-    expect(URL.createObjectURL).toHaveBeenCalledTimes(1);
+    expect(FakeMediaSource.instances).toHaveLength(1);
+  });
 
-    const blob = (URL.createObjectURL as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as Blob;
-    expect(blob.size).toBe("chunk-one".length + "chunk-two".length);
+  it("appends each chunk as it arrives, without waiting for reply_audio_end", async () => {
+    const { ws } = await startAndOpenSession();
+
+    ws.emitServerMessage({ type: "reply_text", text: "Nice job!" });
+    const mediaSource = FakeMediaSource.instances[0]!;
+    mediaSource.open();
+    const sourceBuffer = mediaSource.sourceBuffers[0]!;
+
+    ws.emitBinaryMessage(new Blob(["chunk-one"]));
+    await waitFor(() => {
+      expect(sourceBuffer.appendedText()).toBe("chunk-one");
+    });
+
+    // Still no reply_audio_end — the second chunk is appended as soon as it arrives too.
+    ws.emitBinaryMessage(new Blob(["chunk-two"]));
+    await waitFor(() => {
+      expect(sourceBuffer.appendedText()).toBe("chunk-onechunk-two");
+    });
+
+    ws.emitServerMessage({ type: "reply_audio_end" });
+    await waitFor(() => {
+      expect(mediaSource.endOfStreamCalled).toBe(true);
+    });
+  });
+
+  it("still ends the stream once sourceopen fires late, for a reply_audio_end with no chunks", async () => {
+    const { ws } = await startAndOpenSession();
+
+    // reply_audio_end arrives (an empty reply) before sourceopen — real browsers fire
+    // sourceopen as a separate task, arriving after any already-queued microtask work, so
+    // endOfStream must wait for it rather than checking readyState before it's fired.
+    ws.emitServerMessage({ type: "reply_text", text: "" });
+    ws.emitServerMessage({ type: "reply_audio_end" });
+    const mediaSource = FakeMediaSource.instances[0]!;
+
+    // Let any microtask-only processing run to completion before sourceopen ever fires.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(mediaSource.endOfStreamCalled).toBe(false);
+
+    mediaSource.open();
+
+    await waitFor(() => {
+      expect(mediaSource.endOfStreamCalled).toBe(true);
+    });
+  });
+
+  it("queues a chunk that arrives before the source buffer exists yet", async () => {
+    const { ws } = await startAndOpenSession();
+
+    ws.emitServerMessage({ type: "reply_text", text: "Nice job!" });
+    // Chunk arrives before the simulated sourceopen event fires.
+    ws.emitBinaryMessage(new Blob(["chunk"]));
+
+    const mediaSource = FakeMediaSource.instances[0]!;
+    mediaSource.open();
+
+    await waitFor(() => {
+      expect(mediaSource.sourceBuffers[0]?.appendedText()).toBe("chunk");
+    });
   });
 
   it("revokes the object URL once playback ends", async () => {
     const { ws } = await startAndOpenSession();
 
     ws.emitServerMessage({ type: "reply_text", text: "Nice job!" });
+    FakeMediaSource.instances[0]!.open();
     ws.emitBinaryMessage(new Blob(["chunk"]));
     ws.emitServerMessage({ type: "reply_audio_end" });
 
@@ -292,6 +418,26 @@ describe("Session", () => {
     FakeAudio.instances[0]?.emit("ended");
 
     expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:fake-url");
+  });
+
+  it("reports a console error and notifies the server when autoplay is blocked", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    class RejectingFakeAudio extends FakeAudio {
+      override play(): Promise<void> {
+        this.played = true;
+        return Promise.reject(new Error("NotAllowedError"));
+      }
+    }
+    vi.stubGlobal("Audio", RejectingFakeAudio);
+    const { ws } = await startAndOpenSession();
+
+    ws.emitServerMessage({ type: "reply_text", text: "Nice job!" });
+
+    await waitFor(() => {
+      expect(consoleError).toHaveBeenCalledWith("Failed to play reply audio", expect.any(Error));
+    });
+    expect(ws.sent).toContain(JSON.stringify({ type: "reply_playback_ended" }));
+    consoleError.mockRestore();
   });
 
   it("renders a turn's detected errors in the correction panel", async () => {
@@ -428,8 +574,8 @@ describe("Session", () => {
     const { ws } = await startAndOpenSession();
 
     ws.emitServerMessage({ type: "reply_text", text: "Nice job!" });
+    FakeMediaSource.instances[0]!.open();
     ws.emitBinaryMessage(new Blob(["chunk"]));
-    ws.emitServerMessage({ type: "reply_audio_end" });
 
     await waitFor(() => {
       expect(FakeAudio.instances).toHaveLength(1);
@@ -443,44 +589,74 @@ describe("Session", () => {
     // A subsequent reply's chunks shouldn't be mixed in with anything left over from the
     // interrupted one.
     ws.emitServerMessage({ type: "reply_text", text: "Second reply" });
+    FakeMediaSource.instances[1]!.open();
     ws.emitBinaryMessage(new Blob(["second"]));
     ws.emitServerMessage({ type: "reply_audio_end" });
 
     await waitFor(() => {
       expect(FakeAudio.instances).toHaveLength(2);
     });
-    const createObjectURL = URL.createObjectURL as ReturnType<typeof vi.fn>;
-    const secondBlob = createObjectURL.mock.calls[1]?.[0] as Blob;
-    expect(secondBlob.size).toBe("second".length);
+    await waitFor(() => {
+      expect(FakeMediaSource.instances[1]?.sourceBuffers[0]?.appendedText()).toBe("second");
+    });
+    expect(FakeMediaSource.instances[0]?.sourceBuffers[0]?.appendedText()).toBe("chunk");
   });
 
-  it("tolerates a barge-in mid-stream, before the reply's Audio element exists", async () => {
+  it("ignores a chunk that arrives for a reply that was already interrupted", async () => {
     const { ws } = await startAndOpenSession();
 
     ws.emitServerMessage({ type: "reply_text", text: "Nice job!" });
-    ws.emitBinaryMessage(new Blob(["chunk"]));
+    const interruptedSource = FakeMediaSource.instances[0]!;
+    interruptedSource.open();
+    ws.emitServerMessage({ type: "reply_interrupted" });
 
-    // Barge-in before reply_audio_end ever arrives (no Audio element created yet).
+    // A stray chunk from the interrupted reply shows up late; it must not land in a fresh
+    // MediaSource for whatever comes next, nor throw trying to append to the stale one.
+    ws.emitBinaryMessage(new Blob(["late-chunk"]));
+
+    expect(interruptedSource.sourceBuffers[0]?.appendedText() ?? "").toBe("");
+  });
+
+  it("tolerates a barge-in signal when no reply is in progress", async () => {
+    const { ws } = await startAndOpenSession();
+
     ws.emitServerMessage({ type: "reply_interrupted" });
 
     expect(FakeAudio.instances).toHaveLength(0);
+  });
+
+  it("pauses safely on barge-in before any audio chunk has arrived", async () => {
+    const { ws } = await startAndOpenSession();
+
+    ws.emitServerMessage({ type: "reply_text", text: "Nice job!" });
+    await waitFor(() => {
+      expect(FakeAudio.instances).toHaveLength(1);
+    });
+
+    ws.emitServerMessage({ type: "reply_interrupted" });
+
+    expect(FakeAudio.instances[0]?.paused).toBe(true);
   });
 
   it("starts a fresh audio buffer for each new reply", async () => {
     const { ws } = await startAndOpenSession();
 
     ws.emitServerMessage({ type: "reply_text", text: "First reply" });
+    FakeMediaSource.instances[0]!.open();
     ws.emitBinaryMessage(new Blob(["first-chunk"]));
     ws.emitServerMessage({ type: "reply_audio_end" });
 
     ws.emitServerMessage({ type: "reply_text", text: "Second reply" });
+    FakeMediaSource.instances[1]!.open();
     ws.emitBinaryMessage(new Blob(["second"]));
     ws.emitServerMessage({ type: "reply_audio_end" });
 
     await waitFor(() => {
       expect(FakeAudio.instances).toHaveLength(2);
     });
-    const secondBlob = (URL.createObjectURL as ReturnType<typeof vi.fn>).mock.calls[1]?.[0] as Blob;
-    expect(secondBlob.size).toBe("second".length);
+    await waitFor(() => {
+      expect(FakeMediaSource.instances[1]?.sourceBuffers[0]?.appendedText()).toBe("second");
+    });
+    expect(FakeMediaSource.instances[0]?.sourceBuffers[0]?.appendedText()).toBe("first-chunk");
   });
 });

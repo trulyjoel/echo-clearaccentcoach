@@ -5,7 +5,7 @@ import type {
   ServerToClientMessage,
 } from "@callie/types";
 import { useAuth } from "@clerk/react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { type RefObject, useCallback, useEffect, useRef, useState } from "react";
 
 const CATEGORY_LABELS: Record<ErrorCategory, string> = {
   word_order: "Word order",
@@ -66,6 +66,104 @@ function buildSessionUrl(token: string | null): string {
     : `${wsBase}/api/session`;
 }
 
+/** One in-flight reply's streamed audio: a MediaSource fed chunk-by-chunk as they arrive. */
+interface ReplyAudioSession {
+  audio: HTMLAudioElement;
+  url: string;
+  mediaSource: MediaSource;
+  sourceBufferReady: Promise<SourceBuffer>;
+  /** Chains chunk appends so only one `appendBuffer` call is ever in flight at a time. */
+  appendQueue: Promise<void>;
+  /** Set on barge-in so appends already queued when it happened stop short of running. */
+  interrupted: boolean;
+}
+
+/** Waits for a `SourceBuffer`'s current append to finish before letting the next one start. */
+function appendChunk(sourceBuffer: SourceBuffer, chunk: ArrayBuffer): Promise<void> {
+  return new Promise((resolve) => {
+    sourceBuffer.addEventListener(
+      "updateend",
+      () => {
+        resolve();
+      },
+      { once: true },
+    );
+    sourceBuffer.appendBuffer(chunk);
+  });
+}
+
+/** Chains `task` onto `session`'s append queue so it runs after every previously queued one. */
+function enqueue(session: ReplyAudioSession, task: () => Promise<void>): void {
+  session.appendQueue = session.appendQueue.then(task);
+}
+
+/** Creates a fresh streamed-playback session for a reply and starts it playing immediately. */
+function createReplyAudioSession(
+  replyAudioRef: RefObject<ReplyAudioSession | undefined>,
+  notifyPlaybackEnded: () => void,
+): void {
+  const mediaSource = new MediaSource();
+  const url = URL.createObjectURL(mediaSource);
+  const audio = new Audio(url);
+  const sourceBufferReady = new Promise<SourceBuffer>((resolve, reject) => {
+    mediaSource.addEventListener(
+      "sourceopen",
+      () => {
+        try {
+          resolve(mediaSource.addSourceBuffer("audio/mpeg"));
+        } catch (error) {
+          reject(error as Error);
+        }
+      },
+      { once: true },
+    );
+  });
+  const session: ReplyAudioSession = {
+    audio,
+    url,
+    mediaSource,
+    sourceBufferReady,
+    appendQueue: Promise.resolve(),
+    interrupted: false,
+  };
+  replyAudioRef.current = session;
+
+  // Unsupported mimetype, etc. — without this, every chunk append silently hangs forever
+  // waiting on a promise that's already rejected.
+  sourceBufferReady.catch((error: unknown) => {
+    console.error("Failed to open a source buffer for reply audio", error);
+    session.interrupted = true;
+  });
+
+  audio.addEventListener("ended", () => {
+    URL.revokeObjectURL(url);
+    if (replyAudioRef.current === session) replyAudioRef.current = undefined;
+    notifyPlaybackEnded();
+  });
+  audio.play().catch((error: unknown) => {
+    console.error("Failed to play reply audio", error);
+    notifyPlaybackEnded();
+  });
+}
+
+/** Appends one chunk to `session`'s source buffer, dropping it if the session was interrupted. */
+async function appendReplyAudioChunk(session: ReplyAudioSession, chunk: Blob): Promise<void> {
+  if (session.interrupted) return;
+  const buffer = await chunk.arrayBuffer();
+  if (session.interrupted) return;
+  const sourceBuffer = await session.sourceBufferReady.catch(() => undefined);
+  if (!sourceBuffer || session.interrupted) return;
+  await appendChunk(sourceBuffer, buffer);
+}
+
+/** Marks a reply's audio stream complete once every queued chunk has been appended. */
+async function finishReplyAudioStream(session: ReplyAudioSession): Promise<void> {
+  if (session.interrupted) return;
+  await session.sourceBufferReady.catch(() => undefined);
+  if (session.interrupted) return;
+  if (session.mediaSource.readyState === "open") session.mediaSource.endOfStream();
+}
+
 export function Session() {
   const { getToken } = useAuth();
   const [state, setState] = useState<SessionState>({ status: "idle" });
@@ -73,8 +171,7 @@ export function Session() {
   const wsRef = useRef<WebSocket | undefined>(undefined);
   const recorderRef = useRef<MediaRecorder | undefined>(undefined);
   const streamRef = useRef<MediaStream | undefined>(undefined);
-  const replyAudioChunksRef = useRef<Blob[]>([]);
-  const currentReplyAudioRef = useRef<HTMLAudioElement | undefined>(undefined);
+  const replyAudioRef = useRef<ReplyAudioSession | undefined>(undefined);
 
   const cleanupMedia = useCallback(() => {
     recorderRef.current?.stop();
@@ -117,39 +214,31 @@ export function Session() {
           });
           return;
         case "reply_text":
-          replyAudioChunksRef.current = [];
-          return;
-        case "reply_audio_end": {
-          const blob = new Blob(replyAudioChunksRef.current, { type: "audio/mpeg" });
-          replyAudioChunksRef.current = [];
-          const url = URL.createObjectURL(blob);
-          const audio = new Audio(url);
-          currentReplyAudioRef.current = audio;
           // The server can't tell when audible playback actually finishes (it only streams
           // bytes) — this tells it, so a barge-in mid-playback (after streaming is long done)
           // is still recognized instead of a new reply starting on top of this one.
-          const notifyPlaybackEnded = (): void => {
+          createReplyAudioSession(replyAudioRef, () => {
             const wsMessage: ClientToServerMessage = { type: "reply_playback_ended" };
             if (wsRef.current?.readyState === WebSocket.OPEN) {
               wsRef.current.send(JSON.stringify(wsMessage));
             }
-          };
-          audio.addEventListener("ended", () => {
-            URL.revokeObjectURL(url);
-            if (currentReplyAudioRef.current === audio) currentReplyAudioRef.current = undefined;
-            notifyPlaybackEnded();
           });
-          audio.play().catch((error: unknown) => {
-            console.error("Failed to play reply audio", error);
-            notifyPlaybackEnded();
-          });
+          return;
+        case "reply_audio_end": {
+          const session = replyAudioRef.current;
+          if (session) enqueue(session, () => finishReplyAudioStream(session));
           return;
         }
-        case "reply_interrupted":
-          replyAudioChunksRef.current = [];
-          currentReplyAudioRef.current?.pause();
-          currentReplyAudioRef.current = undefined;
+        case "reply_interrupted": {
+          const session = replyAudioRef.current;
+          if (session) {
+            session.interrupted = true;
+            session.audio.pause();
+            URL.revokeObjectURL(session.url);
+          }
+          replyAudioRef.current = undefined;
           return;
+        }
         case "session_ended":
           cleanupMedia();
           setState((prev) => ({
@@ -195,7 +284,9 @@ export function Session() {
 
       ws.onmessage = (event) => {
         if (event.data instanceof Blob) {
-          replyAudioChunksRef.current.push(event.data);
+          const chunk = event.data;
+          const session = replyAudioRef.current;
+          if (session) enqueue(session, () => appendReplyAudioChunk(session, chunk));
           return;
         }
         handleServerMessage(JSON.parse(event.data) as ServerToClientMessage);
