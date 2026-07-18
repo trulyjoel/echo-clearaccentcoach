@@ -81,6 +81,15 @@ export function registerSessionRoutes(app: FastifyInstance): void {
       }
       let activeTurn: ActiveTurn | null = null;
 
+      /**
+       * Whether the client is (or is about to be) audibly playing a reply. `activeTurn` alone
+       * only covers the pipeline's run — it's cleared as soon as the audio bytes finish
+       * streaming, well before the client finishes playing them — so this extends the
+       * interruptible window through actual client-side playback, ending only when the client
+       * reports `reply_playback_ended`.
+       */
+      let replyPlaying = false;
+
       /** Runs the LLM reply + TTS pipeline for one finished user turn. */
       async function handleTurn(transcript: string): Promise<void> {
         if (activeTurn) return;
@@ -140,7 +149,10 @@ export function registerSessionRoutes(app: FastifyInstance): void {
               if (aborted()) return;
               socket.send(Buffer.from(chunk));
             }
-            if (!aborted()) send({ type: "reply_audio_end" });
+            if (!aborted()) {
+              replyPlaying = true;
+              send({ type: "reply_audio_end" });
+            }
           } catch (error) {
             request.log.error(error, "Failed to synthesize reply audio");
             if (!aborted()) send({ type: "error", message: "Could not synthesize reply audio" });
@@ -164,12 +176,16 @@ export function registerSessionRoutes(app: FastifyInstance): void {
         const transcript = data.channel.alternatives[0]?.transcript ?? "";
         if (!transcript) return;
 
-        // A non-empty transcript arriving while a turn's pipeline is running is real barge-in —
-        // unlike a bare VAD "speech started" ping, background noise can't produce recognized
-        // words, so this can't false-trigger on breathing or room noise the way VAD alone can.
-        if (activeTurn) {
-          activeTurn.interrupted = true;
-          activeTurn = null;
+        // A non-empty transcript arriving while a turn's pipeline is running, or its reply is
+        // still audibly playing, is real barge-in — unlike a bare VAD "speech started" ping,
+        // background noise can't produce recognized words, so this can't false-trigger on
+        // breathing or room noise the way VAD alone can.
+        if (activeTurn || replyPlaying) {
+          if (activeTurn) {
+            activeTurn.interrupted = true;
+            activeTurn = null;
+          }
+          replyPlaying = false;
           send({ type: "reply_interrupted" });
         }
 
@@ -208,6 +224,9 @@ export function registerSessionRoutes(app: FastifyInstance): void {
         }
         if (parsed.type === "end_session") {
           void endSession("user_ended");
+        }
+        if (parsed.type === "reply_playback_ended") {
+          replyPlaying = false;
         }
       });
 

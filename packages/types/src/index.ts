@@ -45,5 +45,14 @@ export type ServerToClientMessage =
   | { type: "session_ended"; reason: SessionEndReason }
   | { type: "error"; message: string };
 
-/** Sent from client to server over the /api/session WebSocket (JSON text frames only — audio is sent as raw binary frames). */
-export type ClientToServerMessage = { type: "end_session" };
+/**
+ * Sent from client to server over the /api/session WebSocket (JSON text frames only — audio is
+ * sent as raw binary frames).
+ *
+ * `reply_playback_ended` is sent when the client's buffered reply audio finishes playing (or
+ * fails to start playing) — the server has no other way to know when audible playback ends,
+ * since it only streams the audio bytes and has no visibility into client-side playback.
+ */
+export type ClientToServerMessage =
+  | { type: "end_session" }
+  | { type: "reply_playback_ended" };

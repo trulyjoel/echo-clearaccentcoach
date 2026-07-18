@@ -1051,4 +1051,71 @@ describe("barge-in support", () => {
     ws.terminate();
     await app.close();
   });
+
+  it("treats speech as barge-in even after the reply has finished streaming, while it's still playing", async () => {
+    await giveConsent();
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    await queue.next(); // session_started
+
+    emitSpeechFinal("hello Callie");
+    await queue.next(); // transcript
+    await queue.next(); // end_of_turn
+    await queue.next(); // reply_text
+    await queue.next(); // audio chunk
+    await queue.next(); // audio chunk
+    await queue.next(); // reply_audio_end — the pipeline has fully finished; nothing is "active"
+    // server-side except the client's not-yet-reported playback of the audio it just received.
+
+    emitInterimSpeech("wait");
+    expect(await queue.next()).toEqual({ kind: "json", message: { type: "reply_interrupted" } });
+
+    ws.terminate();
+    await app.close();
+  });
+
+  it("does not treat speech as barge-in once the client reports playback ended", async () => {
+    await giveConsent();
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    await queue.next(); // session_started
+
+    emitSpeechFinal("hello Callie");
+    await queue.next(); // transcript
+    await queue.next(); // end_of_turn
+    await queue.next(); // reply_text
+    await queue.next(); // audio chunk
+    await queue.next(); // audio chunk
+    await queue.next(); // reply_audio_end
+
+    ws.send(JSON.stringify({ type: "reply_playback_ended" }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    emitSpeechFinal("second turn");
+    expect(await queue.next()).toEqual({
+      kind: "json",
+      message: { type: "transcript", text: "second turn", isFinal: true },
+    });
+    expect(await queue.next()).toEqual({ kind: "json", message: { type: "end_of_turn" } });
+
+    // Drain the rest of the pipeline (reply_text + 2 audio chunks + reply_audio_end) so no
+    // fire-and-forget work from this test is still in flight once afterEach tears down.
+    await queue.next();
+    await queue.next();
+    await queue.next();
+    await queue.next();
+
+    ws.terminate();
+    await app.close();
+  });
 });

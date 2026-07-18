@@ -60,12 +60,23 @@ export function Session() {
           const url = URL.createObjectURL(blob);
           const audio = new Audio(url);
           currentReplyAudioRef.current = audio;
+          // The server can't tell when audible playback actually finishes (it only streams
+          // bytes) — this tells it, so a barge-in mid-playback (after streaming is long done)
+          // is still recognized instead of a new reply starting on top of this one.
+          const notifyPlaybackEnded = (): void => {
+            const wsMessage: ClientToServerMessage = { type: "reply_playback_ended" };
+            if (wsRef.current?.readyState === WebSocket.OPEN) {
+              wsRef.current.send(JSON.stringify(wsMessage));
+            }
+          };
           audio.addEventListener("ended", () => {
             URL.revokeObjectURL(url);
             if (currentReplyAudioRef.current === audio) currentReplyAudioRef.current = undefined;
+            notifyPlaybackEnded();
           });
           audio.play().catch((error: unknown) => {
             console.error("Failed to play reply audio", error);
+            notifyPlaybackEnded();
           });
           return;
         }
