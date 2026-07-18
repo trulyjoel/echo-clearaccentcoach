@@ -3,8 +3,9 @@ import { eq } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { db } from "../db/client.js";
-import { profiles, sessions, turns } from "../db/schema.js";
+import { profiles, sessions, turnErrors, turns } from "../db/schema.js";
 import type { DeepgramConnection, DeepgramMessage } from "../deepgram.js";
+import type { DetectedError } from "../errorTaxonomy.js";
 import type { ConversationMessage } from "../llm.js";
 
 type InjectedWebSocket = Awaited<ReturnType<FastifyInstance["injectWS"]>>;
@@ -83,22 +84,41 @@ vi.mock("../deepgram.js", () => ({
 }));
 
 const llmTestState = vi.hoisted(() => {
-  let replyImpl: (history: ConversationMessage[]) => Promise<string> = async () => "Nice job!";
+  let replyImpl: (history: ConversationMessage[], errors: DetectedError[]) => Promise<string> =
+    async () => "Nice job!";
+  let analyzeImpl: (transcript: string) => Promise<DetectedError[]> = async () => [];
   const calls: ConversationMessage[][] = [];
+  const replyErrorArgs: DetectedError[][] = [];
+  const analyzeCalls: string[] = [];
 
   return {
     reset: (): void => {
       replyImpl = async () => "Nice job!";
+      analyzeImpl = async () => [];
       calls.length = 0;
+      replyErrorArgs.length = 0;
+      analyzeCalls.length = 0;
     },
-    setReplyImpl: (fn: (history: ConversationMessage[]) => Promise<string>): void => {
+    setReplyImpl: (
+      fn: (history: ConversationMessage[], errors: DetectedError[]) => Promise<string>,
+    ): void => {
       replyImpl = fn;
     },
+    setAnalyzeImpl: (fn: (transcript: string) => Promise<DetectedError[]>): void => {
+      analyzeImpl = fn;
+    },
     getCalls: (): ConversationMessage[][] => calls,
+    getReplyErrorArgs: (): DetectedError[][] => replyErrorArgs,
+    getAnalyzeCalls: (): string[] => analyzeCalls,
     getLLMProvider: vi.fn(() => ({
-      generateReply: async (history: ConversationMessage[]) => {
+      analyzeErrors: async (transcript: string) => {
+        analyzeCalls.push(transcript);
+        return analyzeImpl(transcript);
+      },
+      generateReply: async (history: ConversationMessage[], errors: DetectedError[]) => {
         calls.push(history);
-        return replyImpl(history);
+        replyErrorArgs.push(errors);
+        return replyImpl(history, errors);
       },
     })),
   };
@@ -203,6 +223,7 @@ afterEach(async () => {
   deepgramTestState.setShouldFail(false);
   llmTestState.reset();
   ttsTestState.reset();
+  await db.delete(turnErrors);
   await db.delete(turns);
   await db.delete(sessions);
   await db.delete(profiles);
@@ -709,6 +730,154 @@ describe("turn-based reply loop", () => {
     await queue.next(); // reply_audio_end
 
     expect(llmTestState.getCalls()).toHaveLength(1);
+
+    ws.terminate();
+    await app.close();
+  });
+});
+
+describe("two-pass correction pipeline", () => {
+  function emitSpeechFinal(transcript: string): void {
+    deepgramTestState.getLatest()?.emitMessage({
+      type: "Results",
+      is_final: true,
+      speech_final: true,
+      channel: { alternatives: [{ transcript }] },
+    });
+  }
+
+  const sampleError: DetectedError = {
+    category: "subject_verb_agreement",
+    original: "she go",
+    corrected: "she goes",
+    explanation: "Third-person singular verbs take an -s ending.",
+  };
+
+  it("sends pass 1's transcript to analyzeErrors and its output into generateReply", async () => {
+    await giveConsent();
+    llmTestState.setAnalyzeImpl(async () => [sampleError]);
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    await queue.next(); // session_started
+
+    emitSpeechFinal("she go to school");
+    await queue.next(); // transcript
+    await queue.next(); // end_of_turn
+    await queue.next(); // reply_text
+    await queue.next(); // audio chunk
+    await queue.next(); // audio chunk
+    await queue.next(); // reply_audio_end
+
+    expect(llmTestState.getAnalyzeCalls()).toEqual(["she go to school"]);
+    expect(llmTestState.getReplyErrorArgs()).toEqual([[sampleError]]);
+
+    ws.terminate();
+    await app.close();
+  });
+
+  it("persists detected errors linked to the Turn record", async () => {
+    await giveConsent();
+    llmTestState.setAnalyzeImpl(async () => [sampleError]);
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    const started = (await queue.next()) as {
+      kind: "json";
+      message: { type: "session_started"; sessionId: string };
+    };
+    const sessionId = started.message.sessionId;
+
+    emitSpeechFinal("she go to school");
+    await queue.next(); // transcript
+    await queue.next(); // end_of_turn
+    await queue.next(); // reply_text
+    await queue.next(); // audio chunk
+    await queue.next(); // audio chunk
+    await queue.next(); // reply_audio_end
+
+    const [turn] = await db.select().from(turns).where(eq(turns.sessionId, sessionId));
+    expect(turn).toBeDefined();
+    const rows = await db.select().from(turnErrors).where(eq(turnErrors.turnId, turn!.id));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject(sampleError);
+
+    ws.terminate();
+    await app.close();
+  });
+
+  it("persists no error rows and generates a plain reply when no errors are detected", async () => {
+    await giveConsent();
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    const started = (await queue.next()) as {
+      kind: "json";
+      message: { type: "session_started"; sessionId: string };
+    };
+    const sessionId = started.message.sessionId;
+
+    emitSpeechFinal("hello Callie");
+    await queue.next(); // transcript
+    await queue.next(); // end_of_turn
+    await queue.next(); // reply_text
+    await queue.next(); // audio chunk
+    await queue.next(); // audio chunk
+    await queue.next(); // reply_audio_end
+
+    expect(llmTestState.getReplyErrorArgs()).toEqual([[]]);
+
+    const [turn] = await db.select().from(turns).where(eq(turns.sessionId, sessionId));
+    expect(await db.select().from(turnErrors).where(eq(turnErrors.turnId, turn!.id))).toHaveLength(
+      0,
+    );
+
+    ws.terminate();
+    await app.close();
+  });
+
+  it("sends an error and does not persist a Turn when error analysis fails", async () => {
+    await giveConsent();
+    llmTestState.setAnalyzeImpl(async () => {
+      throw new Error("Anthropic unavailable");
+    });
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    const started = (await queue.next()) as {
+      kind: "json";
+      message: { type: "session_started"; sessionId: string };
+    };
+    const sessionId = started.message.sessionId;
+
+    emitSpeechFinal("hello Callie");
+    await queue.next(); // transcript
+    await queue.next(); // end_of_turn
+    expect(await queue.next()).toEqual({
+      kind: "json",
+      message: { type: "error", message: "Could not analyze your speech" },
+    });
+
+    expect(llmTestState.getCalls()).toHaveLength(0);
+    const [row] = await db.select().from(sessions).where(eq(sessions.id, sessionId));
+    expect(row?.endedAt).toBeNull();
+    expect(await db.select().from(turns).where(eq(turns.sessionId, sessionId))).toHaveLength(0);
 
     ws.terminate();
     await app.close();

@@ -3,9 +3,10 @@ import { eq } from "drizzle-orm";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { getAuthenticatedUserId } from "../auth.js";
 import { db } from "../db/client.js";
-import { profiles, sessions, turns } from "../db/schema.js";
+import { profiles, sessions, turnErrors, turns } from "../db/schema.js";
 import type { DeepgramConnection } from "../deepgram.js";
 import { openDeepgramConnection } from "../deepgram.js";
+import type { DetectedError } from "../errorTaxonomy.js";
 import type { ConversationMessage } from "../llm.js";
 import { getLLMProvider } from "../llm.js";
 import { getTTSProvider } from "../tts.js";
@@ -89,11 +90,21 @@ export function registerSessionRoutes(app: FastifyInstance): void {
         try {
           conversationHistory.push({ role: "user", content: transcript });
 
+          let errors: DetectedError[];
+          try {
+            errors = await getLLMProvider().analyzeErrors(transcript);
+          } catch (error) {
+            request.log.error(error, "Failed to analyze errors");
+            if (!ended) send({ type: "error", message: "Could not analyze your speech" });
+            return;
+          }
+          if (aborted()) return;
+
           let replyText: string;
           try {
             // Pass a snapshot: conversationHistory keeps mutating (the assistant reply below,
             // future turns) after this call is made, and callers/tests may hold onto this array.
-            replyText = await getLLMProvider().generateReply([...conversationHistory]);
+            replyText = await getLLMProvider().generateReply([...conversationHistory], errors);
           } catch (error) {
             request.log.error(error, "Failed to generate reply");
             if (!ended) send({ type: "error", message: "Could not generate a reply" });
@@ -103,7 +114,18 @@ export function registerSessionRoutes(app: FastifyInstance): void {
           conversationHistory.push({ role: "assistant", content: replyText });
 
           try {
-            await db.insert(turns).values({ sessionId, transcript, reply: replyText });
+            await db.transaction(async (tx) => {
+              const [turn] = await tx
+                .insert(turns)
+                .values({ sessionId, transcript, reply: replyText })
+                .returning();
+              if (!turn) throw new Error("Failed to insert turn record");
+              if (errors.length > 0) {
+                await tx
+                  .insert(turnErrors)
+                  .values(errors.map((error) => ({ turnId: turn.id, ...error })));
+              }
+            });
           } catch (error) {
             request.log.error(error, "Failed to persist turn");
             if (!ended) send({ type: "error", message: "Could not save this turn" });
