@@ -26,6 +26,7 @@ export function Session() {
   const recorderRef = useRef<MediaRecorder | undefined>(undefined);
   const streamRef = useRef<MediaStream | undefined>(undefined);
   const replyAudioChunksRef = useRef<Blob[]>([]);
+  const currentReplyAudioRef = useRef<HTMLAudioElement | undefined>(undefined);
 
   const cleanupMedia = useCallback(() => {
     recorderRef.current?.stop();
@@ -58,12 +59,21 @@ export function Session() {
           replyAudioChunksRef.current = [];
           const url = URL.createObjectURL(blob);
           const audio = new Audio(url);
-          audio.addEventListener("ended", () => URL.revokeObjectURL(url));
+          currentReplyAudioRef.current = audio;
+          audio.addEventListener("ended", () => {
+            URL.revokeObjectURL(url);
+            if (currentReplyAudioRef.current === audio) currentReplyAudioRef.current = undefined;
+          });
           audio.play().catch((error: unknown) => {
             console.error("Failed to play reply audio", error);
           });
           return;
         }
+        case "reply_interrupted":
+          replyAudioChunksRef.current = [];
+          currentReplyAudioRef.current?.pause();
+          currentReplyAudioRef.current = undefined;
+          return;
         case "session_ended":
           cleanupMedia();
           setState((prev) => ({

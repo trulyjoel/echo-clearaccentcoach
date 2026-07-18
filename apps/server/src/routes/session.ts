@@ -67,15 +67,25 @@ export function registerSessionRoutes(app: FastifyInstance): void {
 
       const conversationHistory: ConversationMessage[] = [];
       let turnTranscriptParts: string[] = [];
-      // Turns are strictly sequential in this ticket (no barge-in yet, that's ticket 06) — this
-      // guards conversationHistory from being mutated out of order if the user keeps talking
-      // while a reply is still being generated, since the mic stays open throughout.
-      let turnInProgress = false;
+
+      /**
+       * Tracks the turn whose LLM/TTS pipeline is currently running, so a Deepgram
+       * SpeechStarted event (the user talking over a reply) can mark it interrupted — the
+       * pipeline checks `interrupted` at each await boundary and bails without sending more
+       * to the client. `activeTurn` is nulled out immediately on barge-in (rather than waiting
+       * for the interrupted pipeline's own cleanup) so the next turn isn't held up by it.
+       */
+      interface ActiveTurn {
+        interrupted: boolean;
+      }
+      let activeTurn: ActiveTurn | null = null;
 
       /** Runs the LLM reply + TTS pipeline for one finished user turn. */
       async function handleTurn(transcript: string): Promise<void> {
-        if (turnInProgress) return;
-        turnInProgress = true;
+        if (activeTurn) return;
+        const myTurn: ActiveTurn = { interrupted: false };
+        activeTurn = myTurn;
+        const aborted = (): boolean => ended || myTurn.interrupted;
         try {
           conversationHistory.push({ role: "user", content: transcript });
 
@@ -89,7 +99,7 @@ export function registerSessionRoutes(app: FastifyInstance): void {
             if (!ended) send({ type: "error", message: "Could not generate a reply" });
             return;
           }
-          if (ended) return;
+          if (aborted()) return;
           conversationHistory.push({ role: "assistant", content: replyText });
 
           try {
@@ -99,22 +109,22 @@ export function registerSessionRoutes(app: FastifyInstance): void {
             if (!ended) send({ type: "error", message: "Could not save this turn" });
             return;
           }
-          if (ended) return;
+          if (aborted()) return;
           send({ type: "reply_text", text: replyText });
 
           try {
             const audioChunks = await getTTSProvider().synthesize(replyText);
             for await (const chunk of audioChunks) {
-              if (ended) return;
+              if (aborted()) return;
               socket.send(Buffer.from(chunk));
             }
-            if (!ended) send({ type: "reply_audio_end" });
+            if (!aborted()) send({ type: "reply_audio_end" });
           } catch (error) {
             request.log.error(error, "Failed to synthesize reply audio");
-            if (!ended) send({ type: "error", message: "Could not synthesize reply audio" });
+            if (!aborted()) send({ type: "error", message: "Could not synthesize reply audio" });
           }
         } finally {
-          turnInProgress = false;
+          if (activeTurn === myTurn) activeTurn = null;
         }
       }
 
@@ -128,6 +138,14 @@ export function registerSessionRoutes(app: FastifyInstance): void {
       }
 
       deepgramConnection.on("message", (data) => {
+        if (data.type === "SpeechStarted") {
+          if (activeTurn) {
+            activeTurn.interrupted = true;
+            activeTurn = null;
+            send({ type: "reply_interrupted" });
+          }
+          return;
+        }
         if (data.type !== "Results") return;
         const transcript = data.channel.alternatives[0]?.transcript ?? "";
         if (!transcript) return;

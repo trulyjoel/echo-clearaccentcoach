@@ -690,8 +690,10 @@ describe("turn-based reply loop", () => {
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
 
-    // The mic stays open, so a second speech_final can arrive before the first turn's
-    // LLM call resolves — no barge-in support yet (ticket 06), so this turn is dropped.
+    // The mic stays open, so a second speech_final can arrive before the first turn's LLM
+    // call resolves. Without an explicit Deepgram SpeechStarted event in between (the real
+    // barge-in signal, see the "barge-in support" tests below), this is treated as a stray
+    // overlap rather than a barge-in, and the turn is dropped.
     emitSpeechFinal("second turn");
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
@@ -707,6 +709,221 @@ describe("turn-based reply loop", () => {
     await queue.next(); // reply_audio_end
 
     expect(llmTestState.getCalls()).toHaveLength(1);
+
+    ws.terminate();
+    await app.close();
+  });
+});
+
+describe("barge-in support", () => {
+  function emitSpeechFinal(transcript: string): void {
+    deepgramTestState.getLatest()?.emitMessage({
+      type: "Results",
+      is_final: true,
+      speech_final: true,
+      channel: { alternatives: [{ transcript }] },
+    });
+  }
+
+  function emitSpeechStarted(): void {
+    deepgramTestState.getLatest()?.emitMessage({ type: "SpeechStarted" });
+  }
+
+  it("does nothing when speech starts and no reply is in progress", async () => {
+    await giveConsent();
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    await queue.next(); // session_started
+
+    emitSpeechStarted();
+
+    // The next real signal (a transcript from ordinary speech) proves no reply_interrupted
+    // was queued ahead of it.
+    deepgramTestState.getLatest()?.emitMessage({
+      type: "Results",
+      is_final: false,
+      speech_final: false,
+      channel: { alternatives: [{ transcript: "hi" }] },
+    });
+    expect(await queue.next()).toEqual({
+      kind: "json",
+      message: { type: "transcript", text: "hi", isFinal: false },
+    });
+
+    ws.terminate();
+    await app.close();
+  });
+
+  it("stops the in-flight TTS stream and notifies the client on barge-in", async () => {
+    await giveConsent();
+    let resolveContinue: () => void = () => {};
+    const continueSignal = new Promise<void>((resolve) => {
+      resolveContinue = resolve;
+    });
+    async function* pausableChunks(): AsyncIterable<Uint8Array> {
+      yield new Uint8Array([1]);
+      await continueSignal;
+      yield new Uint8Array([2]);
+    }
+    ttsTestState.setSynthesizeImpl(async () => pausableChunks());
+
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    await queue.next(); // session_started
+
+    emitSpeechFinal("hello Callie");
+    await queue.next(); // transcript
+    await queue.next(); // end_of_turn
+    await queue.next(); // reply_text
+    expect(await queue.next()).toEqual({ kind: "binary", data: Buffer.from([1]) });
+
+    emitSpeechStarted();
+    expect(await queue.next()).toEqual({ kind: "json", message: { type: "reply_interrupted" } });
+
+    resolveContinue();
+
+    // The next real signal (the barge-in speech being processed as a new turn, asserted in
+    // the test below) is what proves chunk 2 and reply_audio_end were never sent — there's
+    // nothing further to drain from the interrupted turn.
+
+    ws.terminate();
+    await app.close();
+  });
+
+  it("leaves the already-persisted Turn record untouched when a reply is interrupted mid-TTS", async () => {
+    await giveConsent();
+    let resolveContinue: () => void = () => {};
+    const continueSignal = new Promise<void>((resolve) => {
+      resolveContinue = resolve;
+    });
+    async function* pausableChunks(): AsyncIterable<Uint8Array> {
+      yield new Uint8Array([1]);
+      await continueSignal;
+      yield new Uint8Array([2]);
+    }
+    ttsTestState.setSynthesizeImpl(async () => pausableChunks());
+
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    const started = (await queue.next()) as {
+      kind: "json";
+      message: { type: "session_started"; sessionId: string };
+    };
+    const sessionId = started.message.sessionId;
+
+    emitSpeechFinal("hello Callie");
+    await queue.next(); // transcript
+    await queue.next(); // end_of_turn
+    await queue.next(); // reply_text — the Turn is persisted before this is sent
+    await queue.next(); // audio chunk 1
+
+    emitSpeechStarted();
+    await queue.next(); // reply_interrupted
+    resolveContinue();
+    // Give the interrupted turn's continuation a tick to run.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const rows = await db.select().from(turns).where(eq(turns.sessionId, sessionId));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.transcript).toBe("hello Callie");
+    expect(rows[0]?.reply).toBe("Nice job!");
+
+    ws.terminate();
+    await app.close();
+  });
+
+  it("processes barge-in speech as a new turn, not waiting on the interrupted reply", async () => {
+    await giveConsent();
+    let resolveFirstReply: (value: string) => void = () => {};
+    const firstReplyPromise = new Promise<string>((resolve) => {
+      resolveFirstReply = resolve;
+    });
+    llmTestState.setReplyImpl(async () => firstReplyPromise);
+
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    await queue.next(); // session_started
+
+    emitSpeechFinal("first turn");
+    await queue.next(); // transcript
+    await queue.next(); // end_of_turn
+
+    emitSpeechStarted();
+    expect(await queue.next()).toEqual({ kind: "json", message: { type: "reply_interrupted" } });
+
+    // The new turn is processed immediately — it doesn't wait for the interrupted turn's
+    // still-pending LLM call to resolve.
+    llmTestState.setReplyImpl(async () => "Nice job!");
+    emitSpeechFinal("second turn");
+    expect(await queue.next()).toEqual({
+      kind: "json",
+      message: { type: "transcript", text: "second turn", isFinal: true },
+    });
+    expect(await queue.next()).toEqual({ kind: "json", message: { type: "end_of_turn" } });
+    expect(await queue.next()).toEqual({
+      kind: "json",
+      message: { type: "reply_text", text: "Nice job!" },
+    });
+
+    resolveFirstReply("Stale reply");
+
+    ws.terminate();
+    await app.close();
+  });
+
+  it("does not persist a Turn record for a reply interrupted before it was saved", async () => {
+    await giveConsent();
+    let resolveFirstReply: (value: string) => void = () => {};
+    const firstReplyPromise = new Promise<string>((resolve) => {
+      resolveFirstReply = resolve;
+    });
+    llmTestState.setReplyImpl(async () => firstReplyPromise);
+
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    const started = (await queue.next()) as {
+      kind: "json";
+      message: { type: "session_started"; sessionId: string };
+    };
+    const sessionId = started.message.sessionId;
+
+    emitSpeechFinal("first turn");
+    await queue.next(); // transcript
+    await queue.next(); // end_of_turn
+
+    emitSpeechStarted();
+    expect(await queue.next()).toEqual({ kind: "json", message: { type: "reply_interrupted" } });
+
+    resolveFirstReply("Stale reply");
+    // Give the interrupted turn's continuation a tick to run (and confirm it doesn't persist).
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(await db.select().from(turns).where(eq(turns.sessionId, sessionId))).toHaveLength(0);
 
     ws.terminate();
     await app.close();

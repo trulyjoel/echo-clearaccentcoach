@@ -46,6 +46,9 @@ export async function openDeepgramConnection(): Promise<DeepgramConnection> {
     language: "en",
     punctuate: "true",
     interim_results: "true",
+    // Emits a SpeechStarted message the moment the user starts talking, independent of any
+    // transcript result — used to detect barge-in while a reply is still streaming/playing.
+    vad_events: "true",
     // The WS connect call doesn't inherit the client's apiKey as an auth header — Deepgram's
     // scheme is "Authorization: Token <key>", unlike the REST client's own auth provider.
     Authorization: `Token ${getApiKey()}`,

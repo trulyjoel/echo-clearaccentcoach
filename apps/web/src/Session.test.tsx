@@ -69,6 +69,7 @@ class FakeWebSocket {
 class FakeAudio {
   static instances: FakeAudio[] = [];
   played = false;
+  paused = false;
   private readonly listeners: Record<string, Array<() => void>> = {};
 
   constructor(public src: string) {
@@ -82,6 +83,10 @@ class FakeAudio {
   play(): Promise<void> {
     this.played = true;
     return Promise.resolve();
+  }
+
+  pause(): void {
+    this.paused = true;
   }
 
   emit(event: string): void {
@@ -269,6 +274,48 @@ describe("Session", () => {
     FakeAudio.instances[0]?.emit("ended");
 
     expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:fake-url");
+  });
+
+  it("stops playing reply audio and clears the buffer on a server barge-in signal", async () => {
+    const { ws } = await startAndOpenSession();
+
+    ws.emitServerMessage({ type: "reply_text", text: "Nice job!" });
+    ws.emitBinaryMessage(new Blob(["chunk"]));
+    ws.emitServerMessage({ type: "reply_audio_end" });
+
+    await waitFor(() => {
+      expect(FakeAudio.instances).toHaveLength(1);
+    });
+    const playingAudio = FakeAudio.instances[0]!;
+
+    ws.emitServerMessage({ type: "reply_interrupted" });
+
+    expect(playingAudio.paused).toBe(true);
+
+    // A subsequent reply's chunks shouldn't be mixed in with anything left over from the
+    // interrupted one.
+    ws.emitServerMessage({ type: "reply_text", text: "Second reply" });
+    ws.emitBinaryMessage(new Blob(["second"]));
+    ws.emitServerMessage({ type: "reply_audio_end" });
+
+    await waitFor(() => {
+      expect(FakeAudio.instances).toHaveLength(2);
+    });
+    const createObjectURL = URL.createObjectURL as ReturnType<typeof vi.fn>;
+    const secondBlob = createObjectURL.mock.calls[1]?.[0] as Blob;
+    expect(secondBlob.size).toBe("second".length);
+  });
+
+  it("tolerates a barge-in mid-stream, before the reply's Audio element exists", async () => {
+    const { ws } = await startAndOpenSession();
+
+    ws.emitServerMessage({ type: "reply_text", text: "Nice job!" });
+    ws.emitBinaryMessage(new Blob(["chunk"]));
+
+    // Barge-in before reply_audio_end ever arrives (no Audio element created yet).
+    ws.emitServerMessage({ type: "reply_interrupted" });
+
+    expect(FakeAudio.instances).toHaveLength(0);
   });
 
   it("starts a fresh audio buffer for each new reply", async () => {

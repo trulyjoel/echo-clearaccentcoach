@@ -31,6 +31,9 @@ export type SessionEndReason = (typeof SESSION_END_REASONS)[number];
  * The reply's synthesized audio is not part of this union — it's streamed as raw binary
  * frames between `reply_text` and `reply_audio_end`, mirroring how the client streams mic
  * audio up as binary frames alongside its own JSON control messages.
+ *
+ * `reply_interrupted` is sent instead of `reply_audio_end` when the user starts talking
+ * over a reply (barge-in): the client should stop playing/discard that reply's audio.
  */
 export type ServerToClientMessage =
   | { type: "session_started"; sessionId: string }
@@ -38,6 +41,7 @@ export type ServerToClientMessage =
   | { type: "end_of_turn" }
   | { type: "reply_text"; text: string }
   | { type: "reply_audio_end" }
+  | { type: "reply_interrupted" }
   | { type: "session_ended"; reason: SessionEndReason }
   | { type: "error"; message: string };
 
