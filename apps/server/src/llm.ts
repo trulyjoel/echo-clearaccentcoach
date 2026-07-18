@@ -101,8 +101,17 @@ function getApiKey(): string {
   return apiKey;
 }
 
-function getModelId(): string {
+function getReplyModelId(): string {
   return process.env["LLM_MODEL"] ?? "claude-sonnet-5";
+}
+
+/**
+ * Pass 1 is structured error-tagging against a fixed taxonomy, a lighter task than pass 2's
+ * conversational reply generation — defaults to a faster/cheaper model instead of sharing pass
+ * 2's, since baseline testing found it a likely source of several seconds of turn latency.
+ */
+function getAnalysisModelId(): string {
+  return process.env["ANALYSIS_LLM_MODEL"] ?? "claude-haiku-4-5-20251001";
 }
 
 let client: AnthropicProvider | undefined;
@@ -122,7 +131,7 @@ function toTokenUsage(usage: {
 class AnthropicLLMProvider implements LLMProvider {
   async analyzeErrors(transcript: string, l1: L1): Promise<AnalysisResult> {
     const { object, usage } = await generateObject({
-      model: getClient()(getModelId()),
+      model: getClient()(getAnalysisModelId()),
       schema: errorAnalysisSchema,
       system: buildAnalysisSystemPrompt(l1),
       prompt: transcript,
@@ -135,7 +144,7 @@ class AnthropicLLMProvider implements LLMProvider {
     errors: DetectedError[],
   ): Promise<ReplyResult> {
     const { text, usage } = await generateText({
-      model: getClient()(getModelId()),
+      model: getClient()(getReplyModelId()),
       system: buildReplySystemPrompt(errors),
       messages: history,
     });
