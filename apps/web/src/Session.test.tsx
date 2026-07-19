@@ -451,6 +451,7 @@ describe("Session", () => {
         {
           id: "error-1",
           hasClip: true,
+          bookmarked: false,
           category: "subject_verb_agreement",
           original: "she go",
           corrected: "she goes",
@@ -490,6 +491,7 @@ describe("Session", () => {
         {
           id: "error-1",
           hasClip: false,
+          bookmarked: false,
           category: "word_order",
           original: "go I",
           corrected: "I go",
@@ -505,6 +507,7 @@ describe("Session", () => {
         {
           id: "error-2",
           hasClip: false,
+          bookmarked: false,
           category: "article_usage",
           original: "I saw dog",
           corrected: "I saw a dog",
@@ -531,6 +534,7 @@ describe("Session", () => {
         {
           id: "error-1",
           hasClip: false,
+          bookmarked: false,
           category: "preposition_choice",
           original: "arrive to the station",
           corrected: "arrive at the station",
@@ -567,6 +571,7 @@ describe("Session", () => {
         {
           id: "error-1",
           hasClip: false,
+          bookmarked: false,
           category: "verb_tense_aspect",
           original: "I am go",
           corrected: "I am going",
@@ -682,7 +687,7 @@ describe("Session", () => {
       });
     });
 
-    async function emitOneError(hasClip: boolean): Promise<FakeWebSocket> {
+    async function emitOneError(hasClip: boolean, bookmarked = false): Promise<FakeWebSocket> {
       const { ws } = await startAndOpenSession();
       ws.emitServerMessage({
         type: "turn_errors",
@@ -692,6 +697,7 @@ describe("Session", () => {
           {
             id: "error-1",
             hasClip,
+            bookmarked,
             category: "word_order",
             original: "go I",
             corrected: "I go",
@@ -767,6 +773,111 @@ describe("Session", () => {
       await waitFor(() => {
         expect(screen.getByRole("alert")).toHaveTextContent("Couldn't play that audio.");
       });
+      consoleError.mockRestore();
+    });
+  });
+
+  describe("bookmarking a clip", () => {
+    const fetchMock = vi.fn();
+
+    beforeEach(() => {
+      vi.stubGlobal("fetch", fetchMock);
+    });
+
+    function mockBookmarkResponse(bookmarked: boolean): void {
+      fetchMock.mockReset().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ bookmarked }),
+      });
+    }
+
+    async function emitOneError(hasClip: boolean, bookmarked: boolean): Promise<FakeWebSocket> {
+      const { ws } = await startAndOpenSession();
+      ws.emitServerMessage({
+        type: "turn_errors",
+        turnId: "turn-1",
+        createdAt: "2026-07-18T12:00:00.000Z",
+        errors: [
+          {
+            id: "error-1",
+            hasClip,
+            bookmarked,
+            category: "word_order",
+            original: "go I",
+            corrected: "I go",
+            explanation: "Subject comes before the verb in English statements.",
+          },
+        ],
+      });
+      await screen.findByText("go I");
+      return ws;
+    }
+
+    it("shows a Bookmark clip button only when the error has a stored clip", async () => {
+      mockBookmarkResponse(true);
+      await emitOneError(true, false);
+      expect(screen.getByRole("button", { name: "Bookmark clip" })).toBeInTheDocument();
+    });
+
+    it("omits the bookmark button when the error has no stored clip", async () => {
+      mockBookmarkResponse(true);
+      await emitOneError(false, false);
+      expect(screen.queryByRole("button", { name: "Bookmark clip" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Un-bookmark clip" })).not.toBeInTheDocument();
+    });
+
+    it("shows Un-bookmark clip when the clip is already bookmarked", async () => {
+      mockBookmarkResponse(false);
+      await emitOneError(true, true);
+      expect(screen.getByRole("button", { name: "Un-bookmark clip" })).toBeInTheDocument();
+    });
+
+    it("PATCHes the bookmark endpoint with an auth header and flips the button label", async () => {
+      mockBookmarkResponse(true);
+      await emitOneError(true, false);
+      const user = userEvent.setup();
+
+      await user.click(screen.getByRole("button", { name: "Bookmark clip" }));
+
+      await waitFor(() => {
+        expect(fetchMock).toHaveBeenCalledWith(
+          expect.stringContaining("/api/errors/error-1/bookmark"),
+          expect.objectContaining({
+            method: "PATCH",
+            headers: { Authorization: "Bearer test-token" },
+          }),
+        );
+      });
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Un-bookmark clip" })).toBeInTheDocument();
+      });
+    });
+
+    it("flips back to Bookmark clip on a second toggle", async () => {
+      mockBookmarkResponse(false);
+      await emitOneError(true, true);
+      const user = userEvent.setup();
+
+      await user.click(screen.getByRole("button", { name: "Un-bookmark clip" }));
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Bookmark clip" })).toBeInTheDocument();
+      });
+    });
+
+    it("shows an alert if the bookmark toggle fails, without crashing the panel", async () => {
+      fetchMock.mockReset().mockResolvedValue({ ok: false, status: 404 });
+      const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+      await emitOneError(true, false);
+      const user = userEvent.setup();
+
+      await user.click(screen.getByRole("button", { name: "Bookmark clip" }));
+
+      await waitFor(() => {
+        expect(screen.getByRole("alert")).toHaveTextContent("Couldn't update the bookmark.");
+      });
+      expect(screen.getByRole("button", { name: "Bookmark clip" })).toBeInTheDocument();
       consoleError.mockRestore();
     });
   });

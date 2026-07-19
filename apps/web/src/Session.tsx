@@ -50,14 +50,28 @@ async function fetchAndPlayAudio(path: string, token: string | null): Promise<vo
   await audio.play();
 }
 
+/** PATCHes the bookmark toggle endpoint and returns the clip's new bookmarked state. */
+async function toggleBookmark(errorId: string, token: string | null): Promise<boolean> {
+  const response = await fetch(`${getApiBaseUrl()}/api/errors/${errorId}/bookmark`, {
+    method: "PATCH",
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (!response.ok) throw new Error(`Request to bookmark ${errorId} failed: ${response.status}`);
+  const body = (await response.json()) as { bookmarked: boolean };
+  return body.bookmarked;
+}
+
 function CorrectionsPanel({
   corrections,
   getToken,
+  onBookmarkToggled,
 }: {
   corrections: TurnCorrections[];
   getToken: () => Promise<string | null>;
+  onBookmarkToggled: (errorId: string, bookmarked: boolean) => void;
 }) {
   const [playbackError, setPlaybackError] = useState<string | null>(null);
+  const [bookmarkError, setBookmarkError] = useState<string | null>(null);
 
   async function play(path: string): Promise<void> {
     setPlaybackError(null);
@@ -69,9 +83,21 @@ function CorrectionsPanel({
     }
   }
 
+  async function bookmark(errorId: string): Promise<void> {
+    setBookmarkError(null);
+    try {
+      const bookmarked = await toggleBookmark(errorId, await getToken());
+      onBookmarkToggled(errorId, bookmarked);
+    } catch (error) {
+      console.error("Failed to toggle bookmark", error);
+      setBookmarkError("Couldn't update the bookmark.");
+    }
+  }
+
   return (
     <aside aria-label="Corrections">
       {playbackError && <p role="alert">{playbackError}</p>}
+      {bookmarkError && <p role="alert">{bookmarkError}</p>}
       <ul>
         {corrections.flatMap((correction) =>
           correction.errors.map((error) => (
@@ -92,6 +118,11 @@ function CorrectionsPanel({
               <button onClick={() => void play(`/api/errors/${error.id}/target-audio`)}>
                 Play target
               </button>
+              {error.hasClip && (
+                <button onClick={() => void bookmark(error.id)}>
+                  {error.bookmarked ? "Un-bookmark clip" : "Bookmark clip"}
+                </button>
+              )}
             </li>
           )),
         )}
@@ -352,6 +383,21 @@ export function Session() {
     wsRef.current?.send(JSON.stringify(message));
   }, []);
 
+  const handleBookmarkToggled = useCallback((errorId: string, bookmarked: boolean) => {
+    setState((prev) => {
+      if (prev.status !== "active" && prev.status !== "ended") return prev;
+      return {
+        ...prev,
+        corrections: prev.corrections.map((correction) => ({
+          ...correction,
+          errors: correction.errors.map((error) =>
+            error.id === errorId ? { ...error, bookmarked } : error,
+          ),
+        })),
+      };
+    });
+  }, []);
+
   useEffect(() => {
     return () => {
       cleanupMedia();
@@ -376,14 +422,22 @@ export function Session() {
           <button onClick={stopSession}>Stop session</button>
           {serverError && <p role="alert">{serverError}</p>}
           <p>{[...state.finalized, state.interim].filter(Boolean).join(" ")}</p>
-          <CorrectionsPanel corrections={state.corrections} getToken={getToken} />
+          <CorrectionsPanel
+            corrections={state.corrections}
+            getToken={getToken}
+            onBookmarkToggled={handleBookmarkToggled}
+          />
         </>
       )}
       {state.status === "ended" && (
         <>
           <p>Session ended.</p>
           <p>{state.finalized.join(" ")}</p>
-          <CorrectionsPanel corrections={state.corrections} getToken={getToken} />
+          <CorrectionsPanel
+            corrections={state.corrections}
+            getToken={getToken}
+            onBookmarkToggled={handleBookmarkToggled}
+          />
           <button onClick={() => void startSession()}>Start new session</button>
         </>
       )}

@@ -80,6 +80,7 @@ async function persistTurn(
         corrected: row.corrected,
         explanation: row.explanation,
         hasClip: false,
+        bookmarked: false,
       }));
     }
     return { id: turn.id, createdAt: turn.createdAt, errors: persistedErrors };

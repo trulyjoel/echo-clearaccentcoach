@@ -48,6 +48,8 @@ export interface PersistedError extends DetectedError {
   id: string;
   /** Whether a stored audio clip exists for this error's turn (ticket 11). */
   hasClip: boolean;
+  /** Whether the clip is exempted from the 90-day expiry (ticket 13). Meaningless if !hasClip. */
+  bookmarked: boolean;
 }
 
 /**

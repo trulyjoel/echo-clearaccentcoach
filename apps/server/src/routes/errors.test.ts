@@ -242,3 +242,107 @@ describe("ownership across the two endpoints", () => {
     expect(targetResponse.statusCode).toBe(404);
   });
 });
+
+describe("PATCH /api/errors/:errorId/bookmark", () => {
+  it("returns 401 when not authenticated", async () => {
+    const app = buildApp();
+    const response = await app.inject({ method: "PATCH", url: "/api/errors/anything/bookmark" });
+    expect(response.statusCode).toBe(401);
+  });
+
+  it("returns 404 when the error has no stored clip", async () => {
+    const app = buildApp();
+    const { errorId } = await insertError({ withClip: false });
+
+    const response = await app.inject({
+      method: "PATCH",
+      url: `/api/errors/${errorId}/bookmark`,
+      headers: { authorization: "Bearer error-test-user" },
+    });
+
+    expect(response.statusCode).toBe(404);
+  });
+
+  it("returns 404 for an error owned by a different user", async () => {
+    const app = buildApp();
+    const { errorId } = await insertError({ clerkUserId: "someone-else", withClip: true });
+
+    const response = await app.inject({
+      method: "PATCH",
+      url: `/api/errors/${errorId}/bookmark`,
+      headers: { authorization: "Bearer error-test-user" },
+    });
+
+    expect(response.statusCode).toBe(404);
+  });
+
+  it("returns 404 for a nonexistent error id", async () => {
+    const app = buildApp();
+
+    const response = await app.inject({
+      method: "PATCH",
+      url: "/api/errors/00000000-0000-0000-0000-000000000000/bookmark",
+      headers: { authorization: "Bearer error-test-user" },
+    });
+
+    expect(response.statusCode).toBe(404);
+  });
+
+  it("bookmarks an unbookmarked clip and returns the new state", async () => {
+    const app = buildApp();
+    const { errorId } = await insertError({ withClip: true });
+
+    const response = await app.inject({
+      method: "PATCH",
+      url: `/api/errors/${errorId}/bookmark`,
+      headers: { authorization: "Bearer error-test-user" },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ bookmarked: true });
+    const [clip] = await db.select().from(audioClips);
+    expect(clip?.bookmarked).toBe(true);
+  });
+
+  it("un-bookmarks an already-bookmarked clip on a second toggle", async () => {
+    const app = buildApp();
+    const { errorId } = await insertError({ withClip: true });
+
+    await app.inject({
+      method: "PATCH",
+      url: `/api/errors/${errorId}/bookmark`,
+      headers: { authorization: "Bearer error-test-user" },
+    });
+    const response = await app.inject({
+      method: "PATCH",
+      url: `/api/errors/${errorId}/bookmark`,
+      headers: { authorization: "Bearer error-test-user" },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ bookmarked: false });
+    const [clip] = await db.select().from(audioClips);
+    expect(clip?.bookmarked).toBe(false);
+  });
+
+  it("un-bookmarking restores the original expiry rather than resetting it", async () => {
+    const app = buildApp();
+    const { errorId } = await insertError({ withClip: true });
+    const [clipBefore] = await db.select().from(audioClips);
+    const originalExpiry = clipBefore?.expiresAt.getTime();
+
+    await app.inject({
+      method: "PATCH",
+      url: `/api/errors/${errorId}/bookmark`,
+      headers: { authorization: "Bearer error-test-user" },
+    });
+    await app.inject({
+      method: "PATCH",
+      url: `/api/errors/${errorId}/bookmark`,
+      headers: { authorization: "Bearer error-test-user" },
+    });
+
+    const [clipAfter] = await db.select().from(audioClips);
+    expect(clipAfter?.expiresAt.getTime()).toBe(originalExpiry);
+  });
+});
