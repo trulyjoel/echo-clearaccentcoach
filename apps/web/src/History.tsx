@@ -1,6 +1,7 @@
 import type { CategoryFrequency, SessionErrorsResponse, SessionSummary } from "@callie/types";
 import { useAuth } from "@clerk/react";
 import { useEffect, useState } from "react";
+import { apiFetch } from "./api.js";
 import { CATEGORY_LABELS } from "./errorCategoryLabels.js";
 
 type SessionsState =
@@ -8,17 +9,16 @@ type SessionsState =
   | { status: "error" }
   | { status: "ok"; sessions: SessionSummary[] };
 
-type SummaryState = { status: "loading" } | { status: "error" } | { status: "ok"; frequencies: CategoryFrequency[] };
+type SummaryState =
+  | { status: "loading" }
+  | { status: "error" }
+  | { status: "ok"; frequencies: CategoryFrequency[] };
 
 type SelectedSessionState =
   | { status: "none" }
   | { status: "loading"; sessionId: string }
   | { status: "error"; sessionId: string }
   | { status: "ok"; data: SessionErrorsResponse };
-
-function getApiBaseUrl(): string {
-  return import.meta.env["VITE_API_URL"] ?? "";
-}
 
 function formatDate(iso: string): string {
   return new Date(iso).toLocaleDateString("en-US", { timeZone: "UTC" });
@@ -33,10 +33,7 @@ function formatDuration(session: SessionSummary): string {
 }
 
 async function fetchJson<T>(path: string, token: string | null): Promise<T> {
-  const response = await fetch(`${getApiBaseUrl()}${path}`, {
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
-  });
-  if (!response.ok) throw new Error(`Request to ${path} failed: ${response.status}`);
+  const response = await apiFetch(path, token);
   return (await response.json()) as T;
 }
 
@@ -97,13 +94,15 @@ export function History() {
       try {
         const data = await fetchJson<SessionSummary[]>("/api/history/sessions", token);
         if (!cancelled) setSessions({ status: "ok", sessions: data });
-      } catch {
+      } catch (error) {
+        console.error("Failed to load session history", error);
         if (!cancelled) setSessions({ status: "error" });
       }
       try {
         const data = await fetchJson<CategoryFrequency[]>("/api/history/errors/summary", token);
         if (!cancelled) setSummary({ status: "ok", frequencies: data });
-      } catch {
+      } catch (error) {
+        console.error("Failed to load error-frequency summary", error);
         if (!cancelled) setSummary({ status: "error" });
       }
     }
@@ -124,7 +123,8 @@ export function History() {
         token,
       );
       setSelected({ status: "ok", data });
-    } catch {
+    } catch (error) {
+      console.error("Failed to load session errors", error);
       setSelected({ status: "error", sessionId });
     }
   }

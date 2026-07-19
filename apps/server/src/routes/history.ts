@@ -8,7 +8,9 @@ import { and, desc, eq, sql } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { requireUserId } from "../auth.js";
 import { db } from "../db/client.js";
-import { audioClips, sessions, turnErrors, turns } from "../db/schema.js";
+import { sessions, turnErrors, turns } from "../db/schema.js";
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const sessionSummaryColumns = {
   id: sessions.id,
@@ -73,6 +75,9 @@ export function registerHistoryRoutes(app: FastifyInstance): void {
     if (!userId) return reply;
 
     const { sessionId } = request.params as { sessionId: string };
+    if (!UUID_PATTERN.test(sessionId)) {
+      return reply.status(404).send({ error: "Session not found" });
+    }
     const session = await findOwnedSessionSummary(sessionId, userId);
     if (!session) return reply.status(404).send({ error: "Session not found" });
 
@@ -85,12 +90,9 @@ export function registerHistoryRoutes(app: FastifyInstance): void {
           corrected: turnErrors.corrected,
           explanation: turnErrors.explanation,
           createdAt: turnErrors.createdAt,
-          hasClip: sql<boolean>`${turnErrors.audioClipId} is not null`,
-          bookmarked: sql<boolean>`coalesce(${audioClips.bookmarked}, false)`,
         })
         .from(turnErrors)
         .innerJoin(turns, eq(turnErrors.turnId, turns.id))
-        .leftJoin(audioClips, eq(turnErrors.audioClipId, audioClips.id))
         .where(eq(turns.sessionId, sessionId))
         .orderBy(turnErrors.createdAt)
     ).map((row) => ({ ...row, createdAt: row.createdAt.toISOString() }));

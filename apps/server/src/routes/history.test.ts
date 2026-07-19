@@ -140,7 +140,10 @@ describe("GET /api/history/sessions", () => {
 describe("GET /api/history/sessions/:sessionId/errors", () => {
   it("returns 401 when not authenticated", async () => {
     const app = buildApp();
-    const response = await app.inject({ method: "GET", url: "/api/history/sessions/anything/errors" });
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/history/sessions/anything/errors",
+    });
     expect(response.statusCode).toBe(401);
   });
 
@@ -149,6 +152,16 @@ describe("GET /api/history/sessions/:sessionId/errors", () => {
     const response = await app.inject({
       method: "GET",
       url: "/api/history/sessions/00000000-0000-0000-0000-000000000000/errors",
+      headers: { authorization: "Bearer history-test-user" },
+    });
+    expect(response.statusCode).toBe(404);
+  });
+
+  it("returns 404 rather than erroring for a malformed session id", async () => {
+    const app = buildApp();
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/history/sessions/not-a-uuid/errors",
       headers: { authorization: "Bearer history-test-user" },
     });
     expect(response.statusCode).toBe(404);
@@ -167,7 +180,7 @@ describe("GET /api/history/sessions/:sessionId/errors", () => {
     expect(response.statusCode).toBe(404);
   });
 
-  it("returns the session summary and its flagged errors, with clip/bookmark state", async () => {
+  it("returns the session summary and its flagged errors", async () => {
     const app = buildApp();
     const { sessionId } = await insertSession({
       startedAt: new Date("2026-07-01T10:00:00Z"),
@@ -199,8 +212,6 @@ describe("GET /api/history/sessions/:sessionId/errors", () => {
         original: "she go",
         corrected: "she goes",
         explanation: "Third-person singular verbs take an -s ending.",
-        hasClip: true,
-        bookmarked: false,
       }),
     ]);
   });

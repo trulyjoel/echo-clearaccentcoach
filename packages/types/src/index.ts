@@ -62,8 +62,9 @@ export interface SessionSummary {
   errorCount: number;
 }
 
-/** A `PersistedError` plus its own timestamp, for a past session's error list (ticket 14). */
-export interface HistoryErrorEntry extends PersistedError {
+/** A `DetectedError` plus its id and timestamp, for a past session's error list (ticket 14). */
+export interface HistoryErrorEntry extends DetectedError {
+  id: string;
   createdAt: string;
 }
 

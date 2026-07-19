@@ -1,6 +1,7 @@
 import type { ClientToServerMessage, PersistedError, ServerToClientMessage } from "@callie/types";
 import { useAuth } from "@clerk/react";
 import { type RefObject, useCallback, useEffect, useRef, useState } from "react";
+import { apiFetch, getApiBaseUrl } from "./api.js";
 import { CATEGORY_LABELS } from "./errorCategoryLabels.js";
 
 interface TurnCorrections {
@@ -22,16 +23,9 @@ type SessionState =
   | { status: "ended"; finalized: string[]; corrections: TurnCorrections[] }
   | { status: "error"; message: string };
 
-function getApiBaseUrl(): string {
-  return import.meta.env["VITE_API_URL"] ?? "";
-}
-
 /** Fetches an authenticated audio endpoint and plays the response, revoking the blob URL after. */
 async function fetchAndPlayAudio(path: string, token: string | null): Promise<void> {
-  const response = await fetch(`${getApiBaseUrl()}${path}`, {
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
-  });
-  if (!response.ok) throw new Error(`Request to ${path} failed: ${response.status}`);
+  const response = await apiFetch(path, token);
   const objectUrl = URL.createObjectURL(await response.blob());
   const audio = new Audio(objectUrl);
   audio.addEventListener("ended", () => URL.revokeObjectURL(objectUrl), { once: true });
@@ -40,11 +34,7 @@ async function fetchAndPlayAudio(path: string, token: string | null): Promise<vo
 
 /** PATCHes the bookmark toggle endpoint and returns the clip's new bookmarked state. */
 async function toggleBookmark(errorId: string, token: string | null): Promise<boolean> {
-  const response = await fetch(`${getApiBaseUrl()}/api/errors/${errorId}/bookmark`, {
-    method: "PATCH",
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
-  });
-  if (!response.ok) throw new Error(`Request to bookmark ${errorId} failed: ${response.status}`);
+  const response = await apiFetch(`/api/errors/${errorId}/bookmark`, token, { method: "PATCH" });
   const body = (await response.json()) as { bookmarked: boolean };
   return body.bookmarked;
 }

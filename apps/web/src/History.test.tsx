@@ -41,8 +41,6 @@ const sessionErrorsResponse = {
       original: "she go",
       corrected: "she goes",
       explanation: "Third-person singular verbs take an -s ending.",
-      hasClip: false,
-      bookmarked: false,
       createdAt: "2026-07-01T10:05:00.000Z",
     },
   ],
