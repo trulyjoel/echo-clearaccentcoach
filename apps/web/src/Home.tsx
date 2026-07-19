@@ -1,13 +1,16 @@
 import type { AuthMeResponse } from "@callie/types";
 import { useAuth, UserButton } from "@clerk/react";
 import { useEffect, useState } from "react";
+import { History } from "./History.js";
 import { Session } from "./Session.js";
 
 type MeState = { status: "loading" } | { status: "error" } | { status: "ok"; userId: string };
+type View = "practice" | "history";
 
 export function Home() {
   const { getToken } = useAuth();
   const [me, setMe] = useState<MeState>({ status: "loading" });
+  const [view, setView] = useState<View>("practice");
 
   useEffect(() => {
     let cancelled = false;
@@ -48,7 +51,10 @@ export function Home() {
       {me.status === "loading" && <p>Loading...</p>}
       {me.status === "error" && <p>Couldn't load your account.</p>}
       {me.status === "ok" && <p>Signed in as {me.userId}</p>}
-      <Session />
+      <button onClick={() => setView(view === "practice" ? "history" : "practice")}>
+        {view === "practice" ? "View history" : "Back to practice"}
+      </button>
+      {view === "practice" ? <Session /> : <History />}
     </main>
   );
 }

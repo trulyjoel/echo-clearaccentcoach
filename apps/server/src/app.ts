@@ -4,6 +4,7 @@ import { clerkPlugin } from "@clerk/fastify";
 import Fastify, { type FastifyInstance } from "fastify";
 import { registerAuthRoutes } from "./routes/auth.js";
 import { registerErrorRoutes } from "./routes/errors.js";
+import { registerHistoryRoutes } from "./routes/history.js";
 import { registerOnboardingRoutes } from "./routes/onboarding.js";
 import { registerSessionRoutes } from "./routes/session.js";
 
@@ -23,6 +24,7 @@ export function buildApp(): FastifyInstance {
     registerOnboardingRoutes(apiApp);
     registerSessionRoutes(apiApp);
     registerErrorRoutes(apiApp);
+    registerHistoryRoutes(apiApp);
   });
 
   return app;

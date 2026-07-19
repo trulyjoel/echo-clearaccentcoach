@@ -52,6 +52,32 @@ export interface PersistedError extends DetectedError {
   bookmarked: boolean;
 }
 
+/** A past session as listed in the error-history view (ticket 14). */
+export interface SessionSummary {
+  id: string;
+  startedAt: string;
+  endedAt: string | null;
+  endReason: SessionEndReason | null;
+  turnCount: number;
+  errorCount: number;
+}
+
+/** A `PersistedError` plus its own timestamp, for a past session's error list (ticket 14). */
+export interface HistoryErrorEntry extends PersistedError {
+  createdAt: string;
+}
+
+export interface SessionErrorsResponse {
+  session: SessionSummary;
+  errors: HistoryErrorEntry[];
+}
+
+/** How often each error category occurred across a user's sessions (ticket 14). */
+export interface CategoryFrequency {
+  category: ErrorCategory;
+  count: number;
+}
+
 /**
  * Sent from server to client over the /api/session WebSocket.
  *
