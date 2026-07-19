@@ -19,7 +19,7 @@ type SessionState =
       finalized: string[];
       interim: string;
       corrections: TurnCorrections[];
-      /** Callie's in-progress or most recent reply, typed out live as `reply_text_delta` arrives. */
+      /** Callie's in-progress or most recent reply, typed out live as `reply_text_delta` arrives */
       replyCaption: string;
     }
   | { status: "ended"; finalized: string[]; corrections: TurnCorrections[] }

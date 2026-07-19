@@ -289,16 +289,26 @@ export function registerSessionRoutes(app: FastifyInstance): void {
         };
       }
 
+      /** Sends the paired error + interrupted-audio signal for a mid-pipeline failure. */
+      function sendPipelineFailure(message: string): void {
+        if (ended) return;
+        send({ type: "error", message });
+        send({ type: "reply_interrupted", reason: "error" });
+      }
+
       /** Runs the LLM reply + TTS pipeline for one finished user turn. */
       async function handleTurn(transcript: string, audio: Buffer): Promise<void> {
         if (activeTurn) return;
         const myTurn: ActiveTurn = { interrupted: false };
         activeTurn = myTurn;
         const aborted = (): boolean => ended || myTurn.interrupted;
-        // Set once the audio side is running and cleared once it's been awaited — a safety net
-        // so every return path (including barge-in firing between text finishing and audio
-        // being explicitly awaited below) still waits for it before `activeTurn` is released,
-        // preventing a new turn's audio from overlapping this one's still-in-flight bytes.
+        // Set once the audio side is running and cleared once it's explicitly awaited below.
+        // This isn't what makes barge-in start the next turn's audio immediately — barge-in
+        // clears `activeTurn` synchronously in the Deepgram message handler regardless of this —
+        // it's just hygiene for *this* call's own background work: an early return between text
+        // succeeding and the explicit `await waitForAudio()` (e.g. `ended` becoming true mid
+        // persist) would otherwise leave `consumeAudio` running unawaited past this function's
+        // own completion.
         let pendingAudio: (() => Promise<{ audioFailed: boolean }>) | undefined;
         try {
           conversationHistory.push({ role: "user", content: transcript });
@@ -316,10 +326,7 @@ export function registerSessionRoutes(app: FastifyInstance): void {
 
           const result = await streamReplyWithPipelinedTTS(errors, aborted);
           if (result.textFailed) {
-            if (!ended) {
-              send({ type: "error", message: "Could not generate a reply" });
-              send({ type: "reply_interrupted", reason: "error" });
-            }
+            sendPipelineFailure("Could not generate a reply");
             return;
           }
           const { replyText, usage, waitForAudio } = result;
@@ -366,10 +373,7 @@ export function registerSessionRoutes(app: FastifyInstance): void {
           pendingAudio = undefined;
           const { audioFailed } = await waitForAudio();
           if (audioFailed) {
-            if (!ended) {
-              send({ type: "error", message: "Could not synthesize reply audio" });
-              send({ type: "reply_interrupted", reason: "error" });
-            }
+            sendPipelineFailure("Could not synthesize reply audio");
             return;
           }
           if (!aborted()) {

@@ -28,11 +28,12 @@ client can play audio chunks as they arrive (ticket 16) rather than buffering th
       reorder/interleave audio from concurrent TTS calls
 - [x] The client opens its `MediaSource` (ticket 16) on the first `reply_text_delta` of a turn,
       instead of on `reply_text` as today — no separate "audio session started" message needed
-- [x] The full reply text (`reply_text`, unchanged shape) is sent, followed by turn persistence and
-      `turn_errors`, as soon as *generation* completes — independent of whether that turn's audio
-      has finished synthesizing/streaming/playing. This is what lets the "no duplicate/partial
-      turn" requirement below hold: a reply already fully generated is valid and worth persisting
-      even if its audio is later interrupted by barge-in or fails to synthesize.
+- [x] Turn persistence and `turn_errors`, followed by the full reply text (`reply_text`, unchanged
+      shape) — same relative order as before this ticket — happen as soon as *generation* completes,
+      independent of whether that turn's audio has finished synthesizing/streaming/playing. This is
+      what lets the "no duplicate/partial turn" requirement below hold: a reply already fully
+      generated is valid and worth persisting even if its audio is later interrupted by barge-in or
+      fails to synthesize.
 - [x] A mid-stream failure sends `error` plus `reply_interrupted` with a new `reason: "error"`
       field (vs. `reason: "barge_in"` for the existing barge-in case) so the client can visually
       distinguish the two — see Comments for how the two failure kinds (generation vs. synthesis)
@@ -65,10 +66,13 @@ early design gated turn persistence on *both* the text and audio sides finishing
 since by definition the text was already fully generated well before the user started talking over
 the audio. Fixed by decoupling: `streamReplyWithPipelinedTTS` resolves as soon as text generation
 finishes, returning a `waitForAudio()` closure the caller awaits separately once it's already sent
-`reply_text`. A `pendingAudio` safety net in `handleTurn`'s `finally` block still guarantees the
-audio side is always awaited before `activeTurn` is released, even on an early return path that
-never explicitly called `waitForAudio()` — otherwise a barge-in landing between text finishing and
-`waitForAudio()` being called could let two turns' audio overlap on the wire.
+`reply_text`. A `pendingAudio` safety net in `handleTurn`'s `finally` block still awaits the audio
+side on any early-return path that never explicitly called `waitForAudio()` (e.g. `ended` becoming
+true mid-`persistTurn`) — this is just hygiene against leaving that call's own `consumeAudio` running
+unawaited past the function's completion, not a fix for cross-turn audio overlap on barge-in:
+barge-in clears `activeTurn` synchronously in the Deepgram message handler regardless of this safety
+net, which is what lets the next turn start immediately without waiting on the interrupted one (by
+design — see the "processes barge-in speech as a new turn" test).
 
 This decoupling also means a TTS-only failure (text generation fully succeeded) still persists the
 turn/sends `reply_text`/`turn_errors` as normal — only the audio side reports `error` +
@@ -84,8 +88,11 @@ assumptions about when `generateReply` gets called relative to `end_of_turn` bei
 out of scope for this ticket.
 
 TTS calls are billed per-sentence (`elevenlabsCharacters`) rather than once for the full text, since
-each sentence is now its own `synthesize()` call — the sum across sentences equals what the old
-single call billed.
+each sentence is now its own `synthesize()` call. The sum across sentences is a few characters
+*lower* than the old single-call count, not exactly equal — `splitSentences` trims the whitespace
+between sentences before each is billed, and that inter-sentence whitespace is never actually sent
+to ElevenLabs anymore (each sentence is now its own call), so the new count is arguably the more
+accurate one relative to what's actually billed, just not identical to the old total.
 
 Testing: `sentenceSplitter.test.ts` and `asyncQueue.test.ts` cover the two new pure utilities in
 isolation (including a verified mutation-testing pass on the sentence-boundary regex). `llm.test.ts`
