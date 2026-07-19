@@ -19,6 +19,8 @@ type SessionState =
       finalized: string[];
       interim: string;
       corrections: TurnCorrections[];
+      /** Callie's in-progress or most recent reply, typed out live as `reply_text_delta` arrives. */
+      replyCaption: string;
     }
   | { status: "ended"; finalized: string[]; corrections: TurnCorrections[] }
   | { status: "error"; message: string };
@@ -223,6 +225,13 @@ export function Session() {
   const recorderRef = useRef<MediaRecorder | undefined>(undefined);
   const streamRef = useRef<MediaStream | undefined>(undefined);
   const replyAudioRef = useRef<ReplyAudioSession | undefined>(undefined);
+  /**
+   * Whether the next `reply_text_delta` starts a new reply (and thus a new audio session).
+   * `replyAudioRef` alone can't signal this: it stays populated after `reply_audio_end` while
+   * the previous reply is still audibly playing, well past when the next reply's deltas start
+   * arriving (`reply_playback_ended`/barge-in are what eventually clear it).
+   */
+  const awaitingReplySessionRef = useRef(true);
 
   const cleanupMedia = useCallback(() => {
     recorderRef.current?.stop();
@@ -241,6 +250,7 @@ export function Session() {
             finalized: [],
             interim: "",
             corrections: [],
+            replyCaption: "",
           });
           return;
         case "transcript":
@@ -264,23 +274,43 @@ export function Session() {
             return { ...prev, corrections: [...prev.corrections, correction] };
           });
           return;
+        case "reply_text_delta": {
+          // The first delta of a reply is also what starts its audio session — audio can start
+          // streaming before the full reply text (and thus `reply_text`) is known (ticket 17),
+          // so waiting for `reply_text` here would delay playback back to pre-pipelining timing.
+          const isFirstDelta = awaitingReplySessionRef.current;
+          if (isFirstDelta) {
+            awaitingReplySessionRef.current = false;
+            createReplyAudioSession(replyAudioRef, () => {
+              const wsMessage: ClientToServerMessage = { type: "reply_playback_ended" };
+              if (wsRef.current?.readyState === WebSocket.OPEN) {
+                wsRef.current.send(JSON.stringify(wsMessage));
+              }
+            });
+          }
+          setState((prev) => {
+            if (prev.status !== "active") return prev;
+            const replyCaption = isFirstDelta ? message.text : prev.replyCaption + message.text;
+            return { ...prev, replyCaption };
+          });
+          return;
+        }
         case "reply_text":
-          // The server can't tell when audible playback actually finishes (it only streams
-          // bytes) — this tells it, so a barge-in mid-playback (after streaming is long done)
-          // is still recognized instead of a new reply starting on top of this one.
-          createReplyAudioSession(replyAudioRef, () => {
-            const wsMessage: ClientToServerMessage = { type: "reply_playback_ended" };
-            if (wsRef.current?.readyState === WebSocket.OPEN) {
-              wsRef.current.send(JSON.stringify(wsMessage));
-            }
+          // The authoritative full text, once generation completes — supersedes whatever the
+          // accumulated deltas produced, in case of any drift.
+          setState((prev) => {
+            if (prev.status !== "active") return prev;
+            return { ...prev, replyCaption: message.text };
           });
           return;
         case "reply_audio_end": {
+          awaitingReplySessionRef.current = true;
           const session = replyAudioRef.current;
           if (session) enqueue(session, () => finishReplyAudioStream(session));
           return;
         }
         case "reply_interrupted": {
+          awaitingReplySessionRef.current = true;
           const session = replyAudioRef.current;
           if (session) {
             session.interrupted = true;
@@ -288,6 +318,15 @@ export function Session() {
             URL.revokeObjectURL(session.url);
           }
           replyAudioRef.current = undefined;
+          // Barge-in means the user is about to speak over it — the cut-short caption is no
+          // longer relevant, so it's cleared. A pipeline error leaves it in place (alongside the
+          // separate `error` message's banner) since the text generated so far is still valid.
+          if (message.reason === "barge_in") {
+            setState((prev) => {
+              if (prev.status !== "active") return prev;
+              return { ...prev, replyCaption: "" };
+            });
+          }
           return;
         }
         case "session_ended":
@@ -400,6 +439,7 @@ export function Session() {
           <button onClick={stopSession}>Stop session</button>
           {serverError && <p role="alert">{serverError}</p>}
           <p>{[...state.finalized, state.interim].filter(Boolean).join(" ")}</p>
+          {state.replyCaption && <p>{state.replyCaption}</p>}
           <CorrectionsPanel
             corrections={state.corrections}
             getToken={getToken}

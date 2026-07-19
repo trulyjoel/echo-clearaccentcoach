@@ -2,7 +2,7 @@ import { createAnthropic } from "@ai-sdk/anthropic";
 import type { AnthropicProvider } from "@ai-sdk/anthropic";
 import type { DetectedError, L1, SupportedL1 } from "@callie/types";
 import { ERROR_CATEGORIES } from "@callie/types";
-import { generateObject, generateText } from "ai";
+import { generateObject, streamText } from "ai";
 import { z } from "zod";
 import { L1_INTERFERENCE_HINTS } from "./l1Hints.js";
 
@@ -21,16 +21,22 @@ export interface AnalysisResult {
   usage: TokenUsage;
 }
 
-export interface ReplyResult {
-  text: string;
-  usage: TokenUsage;
+/**
+ * Pass 2's streamed output (ticket 17). `textStream` yields deltas as the model generates them;
+ * `usage` resolves once the stream finishes. There's no `text` field — callers that need the full
+ * reply text accumulate it from `textStream` themselves, since they're consuming it anyway (to
+ * detect sentence boundaries, forward deltas to the client, etc.).
+ */
+export interface ReplyStream {
+  textStream: AsyncIterable<string>;
+  usage: Promise<TokenUsage>;
 }
 
 export interface LLMProvider {
   /** Pass 1: tags a turn's transcript with grammar errors, biased by the learner's L1. */
   analyzeErrors(transcript: string, l1: L1): Promise<AnalysisResult>;
-  /** Pass 2: generates a reply, weaving in a correction for the most relevant error, if any. */
-  generateReply(history: ConversationMessage[], errors: DetectedError[]): Promise<ReplyResult>;
+  /** Pass 2: streams a reply, weaving in a correction for the most relevant error, if any. */
+  generateReply(history: ConversationMessage[], errors: DetectedError[]): ReplyStream;
 }
 
 const CALLIE_SYSTEM_PROMPT =
@@ -139,16 +145,14 @@ class AnthropicLLMProvider implements LLMProvider {
     return { errors: object.errors, usage: toTokenUsage(usage) };
   }
 
-  async generateReply(
-    history: ConversationMessage[],
-    errors: DetectedError[],
-  ): Promise<ReplyResult> {
-    const { text, usage } = await generateText({
+  generateReply(history: ConversationMessage[], errors: DetectedError[]): ReplyStream {
+    const result = streamText({
       model: getClient()(getReplyModelId()),
       system: buildReplySystemPrompt(errors),
       messages: history,
     });
-    return { text, usage: toTokenUsage(usage) };
+    const usage = Promise.resolve(result.usage).then(toTokenUsage);
+    return { textStream: result.textStream, usage };
   }
 }
 

@@ -83,20 +83,26 @@ export interface CategoryFrequency {
  * Sent from server to client over the /api/session WebSocket.
  *
  * The reply's synthesized audio is not part of this union — it's streamed as raw binary
- * frames between `reply_text` and `reply_audio_end`, mirroring how the client streams mic
- * audio up as binary frames alongside its own JSON control messages.
+ * frames alongside `reply_text_delta`/`reply_text`, mirroring how the client streams mic
+ * audio up as binary frames alongside its own JSON control messages. Audio for a reply's first
+ * completed sentence can begin streaming before that reply's `reply_text` (the full, final
+ * string) is sent — the client opens its playback session on the first `reply_text_delta`
+ * instead (ticket 17).
  *
- * `reply_interrupted` is sent instead of `reply_audio_end` when the user starts talking
- * over a reply (barge-in): the client should stop playing/discard that reply's audio.
+ * `reply_interrupted` is sent instead of `reply_audio_end` when a reply's playback is cut short:
+ * `reason: "barge_in"` for the user talking over it, `reason: "error"` for a mid-stream pipeline
+ * failure (LLM generation or TTS synthesis). Either way the client should stop playing/discard
+ * that reply's audio; the `reason` lets it distinguish the two for display purposes.
  */
 export type ServerToClientMessage =
   | { type: "session_started"; sessionId: string }
   | { type: "transcript"; text: string; isFinal: boolean }
   | { type: "end_of_turn" }
   | { type: "turn_errors"; turnId: string; createdAt: string; errors: PersistedError[] }
+  | { type: "reply_text_delta"; text: string }
   | { type: "reply_text"; text: string }
   | { type: "reply_audio_end" }
-  | { type: "reply_interrupted" }
+  | { type: "reply_interrupted"; reason: "barge_in" | "error" }
   | { type: "session_ended"; reason: SessionEndReason }
   | { type: "error"; message: string };
 

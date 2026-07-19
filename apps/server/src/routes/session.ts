@@ -8,15 +8,17 @@ import type {
 } from "@callie/types";
 import { eq } from "drizzle-orm";
 import type { FastifyBaseLogger, FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { AsyncQueue } from "../asyncQueue.js";
 import { storeTurnClip } from "../audioClips.js";
 import { getAuthenticatedUserId } from "../auth.js";
 import { db } from "../db/client.js";
 import { profiles, sessions, turnErrors, turns } from "../db/schema.js";
 import type { DeepgramConnection } from "../deepgram.js";
 import { openDeepgramConnection } from "../deepgram.js";
-import type { AnalysisResult, ConversationMessage, ReplyResult } from "../llm.js";
+import type { AnalysisResult, ConversationMessage, TokenUsage } from "../llm.js";
 import { getLLMProvider } from "../llm.js";
 import { getMaxSessionDurationMs, hasReachedDailySessionCap } from "../sessionLimits.js";
+import { splitSentences } from "../sentenceSplitter.js";
 import { getTTSProvider } from "../tts.js";
 import { ensureUsageRecord, recordUsage } from "../usage.js";
 
@@ -191,12 +193,113 @@ export function registerSessionRoutes(app: FastifyInstance): void {
        */
       let replyPlaying = false;
 
+      /**
+       * Starts pass 2 (streamed) and the sentence-pipelined TTS synthesis running concurrently:
+       * as each complete sentence is detected in the reply's token stream, it's handed to the TTS
+       * queue so synthesis for sentence N overlaps with the model still generating sentence N+1,
+       * rather than waiting for the full reply before synthesis starts at all (ticket 17). TTS
+       * calls themselves still run one at a time, in sentence order — only generation and
+       * synthesis overlap, not synthesis with itself — so audio never needs reordering on the
+       * wire.
+       *
+       * Resolves as soon as generation itself finishes, independent of how far behind audio
+       * synthesis is — a reply already fully generated is valid (and worth persisting/sending)
+       * regardless of whether its audio is still playing out, still synthesizing, or gets
+       * interrupted by barge-in partway through. `waitForAudio` lets the caller separately await
+       * the (already-running) audio side once it's ready to, without blocking on it up front.
+       * A failure in generation itself has no valid text to fall back on, so the whole turn is
+       * abandoned instead.
+       */
+      async function streamReplyWithPipelinedTTS(
+        errors: DetectedError[],
+        aborted: () => boolean,
+      ): Promise<
+        | { textFailed: true }
+        | {
+            textFailed: false;
+            replyText: string;
+            usage: TokenUsage;
+            waitForAudio: () => Promise<{ audioFailed: boolean }>;
+          }
+      > {
+        // Pass a snapshot: conversationHistory keeps mutating (the assistant reply below, future
+        // turns) after this call is made, and callers/tests may hold onto this array.
+        const replyStream = getLLMProvider().generateReply([...conversationHistory], errors);
+        const sentenceQueue = new AsyncQueue<string>();
+        let sentenceBuffer = "";
+        let replyText = "";
+        let audioFailed = false;
+
+        async function consumeAudio(): Promise<void> {
+          try {
+            for await (const sentence of sentenceQueue) {
+              if (aborted()) return;
+              // Characters are billed by ElevenLabs as soon as the call is made, regardless of
+              // whether the resulting stream is fully consumed.
+              await recordUsage(sessionId, { elevenlabsCharacters: sentence.length });
+              const audioChunks = await getTTSProvider().synthesize(sentence);
+              for await (const chunk of audioChunks) {
+                if (aborted()) return;
+                socket.send(Buffer.from(chunk));
+              }
+            }
+          } catch (error) {
+            audioFailed = true;
+            request.log.error(error, "Failed to synthesize reply audio");
+          }
+        }
+
+        // Starts immediately and keeps running in the background — awaited later via
+        // `waitForAudio`, not here, so a slow/interrupted audio side never delays the text side.
+        const audioTask = consumeAudio();
+
+        try {
+          for await (const delta of replyStream.textStream) {
+            if (aborted()) break;
+            replyText += delta;
+            send({ type: "reply_text_delta", text: delta });
+            const { sentences, remainder } = splitSentences(sentenceBuffer + delta);
+            sentenceBuffer = remainder;
+            for (const sentence of sentences) sentenceQueue.push(sentence);
+          }
+          const finalSentence = sentenceBuffer.trim();
+          if (finalSentence && !aborted()) sentenceQueue.push(finalSentence);
+        } catch (error) {
+          request.log.error(error, "Failed to generate reply");
+          sentenceQueue.close();
+          await audioTask;
+          return { textFailed: true };
+        }
+        sentenceQueue.close();
+
+        let usage: TokenUsage = { inputTokens: 0, outputTokens: 0 };
+        try {
+          usage = await replyStream.usage;
+        } catch (error) {
+          request.log.error(error, "Failed to read reply token usage");
+        }
+        return {
+          textFailed: false,
+          replyText,
+          usage,
+          waitForAudio: async () => {
+            await audioTask;
+            return { audioFailed };
+          },
+        };
+      }
+
       /** Runs the LLM reply + TTS pipeline for one finished user turn. */
       async function handleTurn(transcript: string, audio: Buffer): Promise<void> {
         if (activeTurn) return;
         const myTurn: ActiveTurn = { interrupted: false };
         activeTurn = myTurn;
         const aborted = (): boolean => ended || myTurn.interrupted;
+        // Set once the audio side is running and cleared once it's been awaited — a safety net
+        // so every return path (including barge-in firing between text finishing and audio
+        // being explicitly awaited below) still waits for it before `activeTurn` is released,
+        // preventing a new turn's audio from overlapping this one's still-in-flight bytes.
+        let pendingAudio: (() => Promise<{ audioFailed: boolean }>) | undefined;
         try {
           conversationHistory.push({ role: "user", content: transcript });
 
@@ -211,24 +314,23 @@ export function registerSessionRoutes(app: FastifyInstance): void {
           const errors = analysis.errors;
           if (aborted()) return;
 
-          let reply: ReplyResult;
-          try {
-            // Pass a snapshot: conversationHistory keeps mutating (the assistant reply below,
-            // future turns) after this call is made, and callers/tests may hold onto this array.
-            reply = await getLLMProvider().generateReply([...conversationHistory], errors);
-          } catch (error) {
-            request.log.error(error, "Failed to generate reply");
-            if (!ended) send({ type: "error", message: "Could not generate a reply" });
+          const result = await streamReplyWithPipelinedTTS(errors, aborted);
+          if (result.textFailed) {
+            if (!ended) {
+              send({ type: "error", message: "Could not generate a reply" });
+              send({ type: "reply_interrupted", reason: "error" });
+            }
             return;
           }
-          const replyText = reply.text;
-          // The vendor calls already ran and were billed regardless of what happens next
-          // (abort, persistence failure), so token usage is recorded unconditionally here.
+          const { replyText, usage, waitForAudio } = result;
+          pendingAudio = waitForAudio;
+          // The vendor calls already ran and were billed regardless of what happens next (abort,
+          // persistence failure), so token usage is recorded unconditionally here.
           await recordUsage(sessionId, {
             analysisInputTokens: analysis.usage.inputTokens,
             analysisOutputTokens: analysis.usage.outputTokens,
-            replyInputTokens: reply.usage.inputTokens,
-            replyOutputTokens: reply.usage.outputTokens,
+            replyInputTokens: usage.inputTokens,
+            replyOutputTokens: usage.outputTokens,
           });
           if (aborted()) return;
           conversationHistory.push({ role: "assistant", content: replyText });
@@ -261,24 +363,21 @@ export function registerSessionRoutes(app: FastifyInstance): void {
           }
           send({ type: "reply_text", text: replyText });
 
-          try {
-            // Characters are billed by ElevenLabs as soon as the call is made, regardless of
-            // whether the resulting stream is fully consumed.
-            await recordUsage(sessionId, { elevenlabsCharacters: replyText.length });
-            const audioChunks = await getTTSProvider().synthesize(replyText);
-            for await (const chunk of audioChunks) {
-              if (aborted()) return;
-              socket.send(Buffer.from(chunk));
+          pendingAudio = undefined;
+          const { audioFailed } = await waitForAudio();
+          if (audioFailed) {
+            if (!ended) {
+              send({ type: "error", message: "Could not synthesize reply audio" });
+              send({ type: "reply_interrupted", reason: "error" });
             }
-            if (!aborted()) {
-              replyPlaying = true;
-              send({ type: "reply_audio_end" });
-            }
-          } catch (error) {
-            request.log.error(error, "Failed to synthesize reply audio");
-            if (!aborted()) send({ type: "error", message: "Could not synthesize reply audio" });
+            return;
+          }
+          if (!aborted()) {
+            replyPlaying = true;
+            send({ type: "reply_audio_end" });
           }
         } finally {
+          if (pendingAudio) await pendingAudio();
           if (activeTurn === myTurn) activeTurn = null;
         }
       }
@@ -331,7 +430,7 @@ export function registerSessionRoutes(app: FastifyInstance): void {
             activeTurn = null;
           }
           replyPlaying = false;
-          send({ type: "reply_interrupted" });
+          send({ type: "reply_interrupted", reason: "barge_in" });
         }
 
         send({ type: "transcript", text: transcript, isFinal: data.is_final ?? false });

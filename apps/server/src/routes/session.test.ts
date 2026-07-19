@@ -138,11 +138,24 @@ const llmTestState = vi.hoisted(() => {
         const errors = await analyzeImpl(transcript, l1);
         return { errors, usage: analyzeUsage };
       },
-      generateReply: async (history: ConversationMessage[], errors: DetectedError[]) => {
+      // Adapts the still Promise<string>-shaped `replyImpl` fixtures used throughout this file
+      // into the real (streaming) LLMProvider contract: the whole reply text arrives as one
+      // delta once `replyImpl`'s promise settles, which every fixture's reply text (a single
+      // short sentence, no embedded sentence breaks) still resolves to exactly one TTS call —
+      // the same shape the pre-streaming tests asserted against.
+      generateReply: (history: ConversationMessage[], errors: DetectedError[]) => {
         calls.push(history);
         replyErrorArgs.push(errors);
-        const text = await replyImpl(history, errors);
-        return { text, usage: replyUsage };
+        const textPromise = replyImpl(history, errors);
+        async function* textStream(): AsyncGenerator<string> {
+          yield await textPromise;
+        }
+        const usage = textPromise.then(() => replyUsage);
+        // `usage` is only read by session.ts on the success path — a rejected `textPromise`
+        // (simulating an LLM failure) would otherwise surface as an unhandled rejection here,
+        // since nothing else attaches a handler to this specific derived promise.
+        usage.catch(() => {});
+        return { textStream: textStream(), usage };
       },
     })),
   };
@@ -547,10 +560,14 @@ describe("turn-based reply loop", () => {
     expect(await queue.next()).toEqual({ kind: "json", message: { type: "end_of_turn" } });
     expect(await queue.next()).toEqual({
       kind: "json",
-      message: { type: "reply_text", text: "Nice job!" },
+      message: { type: "reply_text_delta", text: "Nice job!" },
     });
     expect(await queue.next()).toEqual({ kind: "binary", data: Buffer.from([1, 2, 3]) });
     expect(await queue.next()).toEqual({ kind: "binary", data: Buffer.from([4, 5]) });
+    expect(await queue.next()).toEqual({
+      kind: "json",
+      message: { type: "reply_text", text: "Nice job!" },
+    });
     expect(await queue.next()).toEqual({ kind: "json", message: { type: "reply_audio_end" } });
 
     expect(ttsTestState.getCalls()).toEqual(["Nice job!"]);
@@ -577,6 +594,9 @@ describe("turn-based reply loop", () => {
     emitSpeechFinal("hello Callie");
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
+    await queue.next(); // reply_text_delta
+    await queue.next(); // audio chunk
+    await queue.next(); // audio chunk
     // The Turn is persisted before reply_text is sent, so waiting for it is enough.
     expect(await queue.next()).toEqual({
       kind: "json",
@@ -588,10 +608,8 @@ describe("turn-based reply loop", () => {
     expect(rows[0]?.transcript).toBe("hello Callie");
     expect(rows[0]?.reply).toBe("Nice job!");
 
-    // Drain the rest of the pipeline (audio chunks + reply_audio_end) so no fire-and-forget
-    // work from this test is still in flight once afterEach tears down the database rows.
-    await queue.next();
-    await queue.next();
+    // Drain the rest of the pipeline (reply_audio_end) so no fire-and-forget work from this
+    // test is still in flight once afterEach tears down the database rows.
     await queue.next();
 
     ws.terminate();
@@ -629,9 +647,10 @@ describe("turn-based reply loop", () => {
     expect(llmTestState.getCalls()).toEqual([[{ role: "user", content: "hello Callie" }]]);
 
     // Drain the rest of the pipeline before tearing down, per the note above.
+    await queue.next(); // reply_text_delta
+    await queue.next(); // audio chunk
+    await queue.next(); // audio chunk
     await queue.next(); // reply_text
-    await queue.next(); // audio chunk
-    await queue.next(); // audio chunk
     await queue.next(); // reply_audio_end
 
     ws.terminate();
@@ -692,9 +711,10 @@ describe("turn-based reply loop", () => {
     expect(llmTestState.getCalls()).toEqual([[{ role: "user", content: "hello Callie" }]]);
 
     // Drain the rest of the pipeline before tearing down, per the note above.
+    await queue.next(); // reply_text_delta
+    await queue.next(); // audio chunk
+    await queue.next(); // audio chunk
     await queue.next(); // reply_text
-    await queue.next(); // audio chunk
-    await queue.next(); // audio chunk
     await queue.next(); // reply_audio_end
 
     ws.terminate();
@@ -719,9 +739,10 @@ describe("turn-based reply loop", () => {
     deepgramTestState.getLatest()?.emitMessage({ type: "UtteranceEnd" });
 
     // Drain the one legitimate turn's pipeline.
+    await queue.next(); // reply_text_delta
+    await queue.next(); // audio chunk
+    await queue.next(); // audio chunk
     await queue.next(); // reply_text
-    await queue.next(); // audio chunk
-    await queue.next(); // audio chunk
     await queue.next(); // reply_audio_end
 
     // Give any wrongly-triggered second turn a chance to start before asserting it didn't.
@@ -732,9 +753,9 @@ describe("turn-based reply loop", () => {
     await app.close();
   });
 
-  /** Drains one turn: transcript, end_of_turn, reply_text, 2 audio chunks, audio_end. */
+  /** Drains one turn: transcript, end_of_turn, reply_text_delta, 2 audio chunks, reply_text, audio_end. */
   async function drainOneTurn(queue: { next: () => Promise<QueuedFrame> }): Promise<void> {
-    for (let i = 0; i < 6; i++) await queue.next();
+    for (let i = 0; i < 7; i++) await queue.next();
   }
 
   it("carries recent conversation history into the next turn's reply", async () => {
@@ -819,6 +840,7 @@ describe("turn-based reply loop", () => {
     emitSpeechFinal("hello Callie");
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
+    await queue.next(); // reply_text_delta
     expect(await queue.next()).toEqual({
       kind: "json",
       message: { type: "reply_text", text: "Nice job!" },
@@ -826,6 +848,10 @@ describe("turn-based reply loop", () => {
     expect(await queue.next()).toEqual({
       kind: "json",
       message: { type: "error", message: "Could not synthesize reply audio" },
+    });
+    expect(await queue.next()).toEqual({
+      kind: "json",
+      message: { type: "reply_interrupted", reason: "error" },
     });
 
     const [row] = await db.select().from(sessions).where(eq(sessions.id, sessionId));
@@ -872,9 +898,10 @@ describe("two-pass correction pipeline", () => {
     emitSpeechFinal("she go to school");
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
+    await queue.next(); // reply_text_delta
+    await queue.next(); // audio chunk
+    await queue.next(); // audio chunk
     await queue.next(); // reply_text
-    await queue.next(); // audio chunk
-    await queue.next(); // audio chunk
     await queue.next(); // reply_audio_end
 
     expect(llmTestState.getAnalyzeCalls()).toEqual(["she go to school"]);
@@ -903,9 +930,10 @@ describe("two-pass correction pipeline", () => {
     emitSpeechFinal("she go to school");
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
+    await queue.next(); // reply_text_delta
+    await queue.next(); // audio chunk
+    await queue.next(); // audio chunk
     await queue.next(); // reply_text
-    await queue.next(); // audio chunk
-    await queue.next(); // audio chunk
     await queue.next(); // reply_audio_end
 
     const [turn] = await db.select().from(turns).where(eq(turns.sessionId, sessionId));
@@ -936,9 +964,10 @@ describe("two-pass correction pipeline", () => {
     emitSpeechFinal("hello Callie");
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
+    await queue.next(); // reply_text_delta
+    await queue.next(); // audio chunk
+    await queue.next(); // audio chunk
     await queue.next(); // reply_text
-    await queue.next(); // audio chunk
-    await queue.next(); // audio chunk
     await queue.next(); // reply_audio_end
 
     expect(llmTestState.getReplyErrorArgs()).toEqual([[]]);
@@ -1020,6 +1049,9 @@ describe("correction text panel", () => {
     emitSpeechFinal("she go to school");
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
+    await queue.next(); // reply_text_delta
+    await queue.next(); // audio chunk
+    await queue.next(); // audio chunk
 
     const turnErrorsFrame = await queue.next();
     expect(turnErrorsFrame).toEqual({
@@ -1055,6 +1087,9 @@ describe("correction text panel", () => {
     emitSpeechFinal("hello Callie");
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
+    await queue.next(); // reply_text_delta
+    await queue.next(); // audio chunk
+    await queue.next(); // audio chunk
 
     // Straight to reply_text — no turn_errors frame in between.
     expect(await queue.next()).toEqual({
@@ -1077,9 +1112,9 @@ describe("L1-driven interference hints", () => {
     });
   }
 
-  /** Drains one turn: transcript, end_of_turn, reply_text, 2 audio chunks, audio_end. */
+  /** Drains one turn: transcript, end_of_turn, reply_text_delta, 2 audio chunks, reply_text, audio_end. */
   async function drainOneTurn(queue: { next: () => Promise<QueuedFrame> }): Promise<void> {
-    for (let i = 0; i < 6; i++) await queue.next();
+    for (let i = 0; i < 7; i++) await queue.next();
   }
 
   it("passes the user's stored L1 to analyzeErrors", async () => {
@@ -1209,9 +1244,10 @@ describe("usage metering", () => {
     emitSpeechFinal("hello Callie");
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
+    await queue.next(); // reply_text_delta
+    await queue.next(); // audio chunk
+    await queue.next(); // audio chunk
     await queue.next(); // reply_text
-    await queue.next(); // audio chunk
-    await queue.next(); // audio chunk
     await queue.next(); // reply_audio_end
 
     const [usage] = await db
@@ -1327,9 +1363,10 @@ describe("audio clip capture + storage", () => {
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
     await queue.next(); // turn_errors
+    await queue.next(); // reply_text_delta
+    await queue.next(); // audio chunk
+    await queue.next(); // audio chunk
     await queue.next(); // reply_text
-    await queue.next(); // audio chunk
-    await queue.next(); // audio chunk
     await queue.next(); // reply_audio_end
 
     const uploads = storageTestState.getUploads();
@@ -1362,9 +1399,10 @@ describe("audio clip capture + storage", () => {
     emitSpeechFinal("hello Callie");
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
+    await queue.next(); // reply_text_delta
+    await queue.next(); // audio chunk
+    await queue.next(); // audio chunk
     await queue.next(); // reply_text
-    await queue.next(); // audio chunk
-    await queue.next(); // audio chunk
     await queue.next(); // reply_audio_end
 
     expect(storageTestState.getUploads()).toHaveLength(0);
@@ -1385,15 +1423,17 @@ describe("audio clip capture + storage", () => {
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
 
+    // Each turn has a detected error (sampleError), so an extra turn_errors frame is sent too:
+    // transcript, end_of_turn, turn_errors, reply_text_delta, 2 audio chunks, reply_text, audio_end.
     ws.send(Buffer.from([1]));
     await new Promise((resolve) => setTimeout(resolve, 20));
     emitSpeechFinal("first turn");
-    for (let i = 0; i < 7; i++) await queue.next();
+    for (let i = 0; i < 8; i++) await queue.next();
 
     ws.send(Buffer.from([2]));
     await new Promise((resolve) => setTimeout(resolve, 20));
     emitSpeechFinal("second turn");
-    for (let i = 0; i < 7; i++) await queue.next();
+    for (let i = 0; i < 8; i++) await queue.next();
 
     const uploads = storageTestState.getUploads();
     expect(uploads).toHaveLength(2);
@@ -1473,11 +1513,15 @@ describe("barge-in support", () => {
     emitSpeechFinal("hello Callie");
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
-    await queue.next(); // reply_text
+    await queue.next(); // reply_text_delta
     expect(await queue.next()).toEqual({ kind: "binary", data: Buffer.from([1]) });
+    await queue.next(); // reply_text — sent independently of (and racing) the audio side
 
     emitInterimSpeech("wait");
-    expect(await queue.next()).toEqual({ kind: "json", message: { type: "reply_interrupted" } });
+    expect(await queue.next()).toEqual({
+      kind: "json",
+      message: { type: "reply_interrupted", reason: "barge_in" },
+    });
 
     resolveContinue();
 
@@ -1518,8 +1562,9 @@ describe("barge-in support", () => {
     emitSpeechFinal("hello Callie");
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
-    await queue.next(); // reply_text — the Turn is persisted before this is sent
+    await queue.next(); // reply_text_delta
     await queue.next(); // audio chunk 1
+    await queue.next(); // reply_text — the Turn is persisted before this is sent
 
     emitInterimSpeech("wait");
     await queue.next(); // reply_interrupted
@@ -1562,12 +1607,21 @@ describe("barge-in support", () => {
     // interrupted turn's still-pending LLM call to resolve.
     llmTestState.setReplyImpl(async () => "Nice job!");
     emitSpeechFinal("second turn");
-    expect(await queue.next()).toEqual({ kind: "json", message: { type: "reply_interrupted" } });
+    expect(await queue.next()).toEqual({
+      kind: "json",
+      message: { type: "reply_interrupted", reason: "barge_in" },
+    });
     expect(await queue.next()).toEqual({
       kind: "json",
       message: { type: "transcript", text: "second turn", isFinal: true },
     });
     expect(await queue.next()).toEqual({ kind: "json", message: { type: "end_of_turn" } });
+    expect(await queue.next()).toEqual({
+      kind: "json",
+      message: { type: "reply_text_delta", text: "Nice job!" },
+    });
+    await queue.next(); // audio chunk
+    await queue.next(); // audio chunk
     expect(await queue.next()).toEqual({
       kind: "json",
       message: { type: "reply_text", text: "Nice job!" },
@@ -1605,7 +1659,10 @@ describe("barge-in support", () => {
     await queue.next(); // end_of_turn
 
     emitInterimSpeech("wait");
-    expect(await queue.next()).toEqual({ kind: "json", message: { type: "reply_interrupted" } });
+    expect(await queue.next()).toEqual({
+      kind: "json",
+      message: { type: "reply_interrupted", reason: "barge_in" },
+    });
 
     resolveFirstReply("Stale reply");
     // Give the interrupted turn's continuation a tick to run (and confirm it doesn't persist).
@@ -1631,14 +1688,18 @@ describe("barge-in support", () => {
     emitSpeechFinal("hello Callie");
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
+    await queue.next(); // reply_text_delta
+    await queue.next(); // audio chunk
+    await queue.next(); // audio chunk
     await queue.next(); // reply_text
-    await queue.next(); // audio chunk
-    await queue.next(); // audio chunk
     await queue.next(); // reply_audio_end — the pipeline has fully finished; nothing is "active"
     // server-side except the client's not-yet-reported playback of the audio it just received.
 
     emitInterimSpeech("wait");
-    expect(await queue.next()).toEqual({ kind: "json", message: { type: "reply_interrupted" } });
+    expect(await queue.next()).toEqual({
+      kind: "json",
+      message: { type: "reply_interrupted", reason: "barge_in" },
+    });
 
     ws.terminate();
     await app.close();
@@ -1658,9 +1719,10 @@ describe("barge-in support", () => {
     emitSpeechFinal("hello Callie");
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
+    await queue.next(); // reply_text_delta
+    await queue.next(); // audio chunk
+    await queue.next(); // audio chunk
     await queue.next(); // reply_text
-    await queue.next(); // audio chunk
-    await queue.next(); // audio chunk
     await queue.next(); // reply_audio_end
 
     ws.send(JSON.stringify({ type: "reply_playback_ended" }));

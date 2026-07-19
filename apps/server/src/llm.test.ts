@@ -6,18 +6,25 @@ const anthropicTestState = vi.hoisted(() => ({
 }));
 vi.mock("@ai-sdk/anthropic", () => ({ createAnthropic: anthropicTestState.createAnthropic }));
 
+async function* textDeltas(text: string): AsyncGenerator<string> {
+  yield text;
+}
+
 const aiTestState = vi.hoisted(() => ({
   generateObjectCalls: [] as unknown[],
-  generateTextCalls: [] as unknown[],
+  streamTextCalls: [] as unknown[],
 }));
 vi.mock("ai", () => ({
   generateObject: vi.fn(async (args: { model: unknown }) => {
     aiTestState.generateObjectCalls.push(args.model);
     return { object: { errors: [] }, usage: { inputTokens: 1, outputTokens: 1 } };
   }),
-  generateText: vi.fn(async (args: { model: unknown }) => {
-    aiTestState.generateTextCalls.push(args.model);
-    return { text: "Nice job!", usage: { inputTokens: 1, outputTokens: 1 } };
+  streamText: vi.fn((args: { model: unknown }) => {
+    aiTestState.streamTextCalls.push(args.model);
+    return {
+      textStream: textDeltas("Nice job!"),
+      usage: Promise.resolve({ inputTokens: 1, outputTokens: 1 }),
+    };
   }),
 }));
 
@@ -54,13 +61,28 @@ describe("buildAnalysisSystemPrompt", () => {
   });
 });
 
+describe("generateReply streaming", () => {
+  it("exposes the mocked model's deltas via textStream and its usage via usage", async () => {
+    process.env["ANTHROPIC_API_KEY"] = "test-key";
+    const provider = getLLMProvider();
+
+    const stream = provider.generateReply([{ role: "user", content: "hi" }], []);
+
+    const deltas: string[] = [];
+    for await (const delta of stream.textStream) deltas.push(delta);
+
+    expect(deltas.join("")).toBe("Nice job!");
+    expect(await stream.usage).toEqual({ inputTokens: 1, outputTokens: 1 });
+  });
+});
+
 describe("per-pass model selection", () => {
   const originalEnv = { ...process.env };
 
   afterEach(() => {
     process.env = { ...originalEnv };
     aiTestState.generateObjectCalls.length = 0;
-    aiTestState.generateTextCalls.length = 0;
+    aiTestState.streamTextCalls.length = 0;
   });
 
   it("defaults the analysis pass to a faster model than the reply pass", async () => {
@@ -75,7 +97,7 @@ describe("per-pass model selection", () => {
     expect(aiTestState.generateObjectCalls.at(-1)).toEqual({
       __modelId: "claude-haiku-4-5-20251001",
     });
-    expect(aiTestState.generateTextCalls.at(-1)).toEqual({ __modelId: "claude-sonnet-5" });
+    expect(aiTestState.streamTextCalls.at(-1)).toEqual({ __modelId: "claude-sonnet-5" });
   });
 
   it("honors ANALYSIS_LLM_MODEL and LLM_MODEL independently", async () => {
@@ -88,6 +110,6 @@ describe("per-pass model selection", () => {
     await provider.generateReply([{ role: "user", content: "hi" }], []);
 
     expect(aiTestState.generateObjectCalls.at(-1)).toEqual({ __modelId: "custom-analysis-model" });
-    expect(aiTestState.generateTextCalls.at(-1)).toEqual({ __modelId: "custom-reply-model" });
+    expect(aiTestState.streamTextCalls.at(-1)).toEqual({ __modelId: "custom-reply-model" });
   });
 });

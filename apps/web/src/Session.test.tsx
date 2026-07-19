@@ -329,10 +329,10 @@ describe("Session", () => {
     expect(screen.getByRole("button", { name: "Stop session" })).toBeInTheDocument();
   });
 
-  it("starts playing the reply's audio element as soon as reply_text arrives", async () => {
+  it("starts playing the reply's audio element as soon as the first reply_text_delta arrives", async () => {
     const { ws } = await startAndOpenSession();
 
-    ws.emitServerMessage({ type: "reply_text", text: "Nice job!" });
+    ws.emitServerMessage({ type: "reply_text_delta", text: "Nice job!" });
 
     await waitFor(() => {
       expect(FakeAudio.instances).toHaveLength(1);
@@ -342,10 +342,83 @@ describe("Session", () => {
     expect(FakeMediaSource.instances).toHaveLength(1);
   });
 
+  it("renders reply_text_delta chunks as a live, growing caption", async () => {
+    const { ws } = await startAndOpenSession();
+
+    ws.emitServerMessage({ type: "reply_text_delta", text: "Nice " });
+    await waitFor(() => {
+      expect(screen.getByText("Nice")).toBeInTheDocument();
+    });
+
+    ws.emitServerMessage({ type: "reply_text_delta", text: "job!" });
+    await waitFor(() => {
+      expect(screen.getByText("Nice job!")).toBeInTheDocument();
+    });
+  });
+
+  it("does not open a second audio session for the second delta of the same reply", async () => {
+    const { ws } = await startAndOpenSession();
+
+    ws.emitServerMessage({ type: "reply_text_delta", text: "Nice " });
+    await waitFor(() => {
+      expect(FakeMediaSource.instances).toHaveLength(1);
+    });
+    ws.emitServerMessage({ type: "reply_text_delta", text: "job!" });
+
+    expect(FakeMediaSource.instances).toHaveLength(1);
+  });
+
+  it("finalizes the caption to the authoritative full text once reply_text arrives", async () => {
+    const { ws } = await startAndOpenSession();
+
+    ws.emitServerMessage({ type: "reply_text_delta", text: "Nice " });
+    ws.emitServerMessage({ type: "reply_text", text: "Nice job!" });
+
+    await waitFor(() => {
+      expect(screen.getByText("Nice job!")).toBeInTheDocument();
+    });
+  });
+
+  it("starts a fresh caption and audio session for the next reply after reply_audio_end", async () => {
+    const { ws } = await startAndOpenSession();
+
+    ws.emitServerMessage({ type: "reply_text_delta", text: "First reply" });
+    ws.emitServerMessage({ type: "reply_audio_end" });
+
+    ws.emitServerMessage({ type: "reply_text_delta", text: "Second reply" });
+
+    await waitFor(() => {
+      expect(FakeMediaSource.instances).toHaveLength(2);
+    });
+    expect(screen.getByText("Second reply")).toBeInTheDocument();
+    expect(screen.queryByText("First replySecond reply")).not.toBeInTheDocument();
+  });
+
+  it("clears the caption on barge-in but keeps it for a pipeline error", async () => {
+    const { ws } = await startAndOpenSession();
+
+    ws.emitServerMessage({ type: "reply_text_delta", text: "Nice job" });
+    await screen.findByText("Nice job");
+
+    ws.emitServerMessage({ type: "reply_interrupted", reason: "barge_in" });
+    await waitFor(() => {
+      expect(screen.queryByText("Nice job")).not.toBeInTheDocument();
+    });
+
+    ws.emitServerMessage({ type: "reply_text_delta", text: "Oh no" });
+    await screen.findByText("Oh no");
+
+    ws.emitServerMessage({
+      type: "reply_interrupted",
+      reason: "error",
+    });
+    expect(screen.getByText("Oh no")).toBeInTheDocument();
+  });
+
   it("appends each chunk as it arrives, without waiting for reply_audio_end", async () => {
     const { ws } = await startAndOpenSession();
 
-    ws.emitServerMessage({ type: "reply_text", text: "Nice job!" });
+    ws.emitServerMessage({ type: "reply_text_delta", text: "Nice job!" });
     const mediaSource = FakeMediaSource.instances[0]!;
     mediaSource.open();
     const sourceBuffer = mediaSource.sourceBuffers[0]!;
@@ -373,7 +446,7 @@ describe("Session", () => {
     // reply_audio_end arrives (an empty reply) before sourceopen — real browsers fire
     // sourceopen as a separate task, arriving after any already-queued microtask work, so
     // endOfStream must wait for it rather than checking readyState before it's fired.
-    ws.emitServerMessage({ type: "reply_text", text: "" });
+    ws.emitServerMessage({ type: "reply_text_delta", text: "" });
     ws.emitServerMessage({ type: "reply_audio_end" });
     const mediaSource = FakeMediaSource.instances[0]!;
 
@@ -392,7 +465,7 @@ describe("Session", () => {
   it("queues a chunk that arrives before the source buffer exists yet", async () => {
     const { ws } = await startAndOpenSession();
 
-    ws.emitServerMessage({ type: "reply_text", text: "Nice job!" });
+    ws.emitServerMessage({ type: "reply_text_delta", text: "Nice job!" });
     // Chunk arrives before the simulated sourceopen event fires.
     ws.emitBinaryMessage(new Blob(["chunk"]));
 
@@ -407,7 +480,7 @@ describe("Session", () => {
   it("revokes the object URL once playback ends", async () => {
     const { ws } = await startAndOpenSession();
 
-    ws.emitServerMessage({ type: "reply_text", text: "Nice job!" });
+    ws.emitServerMessage({ type: "reply_text_delta", text: "Nice job!" });
     FakeMediaSource.instances[0]!.open();
     ws.emitBinaryMessage(new Blob(["chunk"]));
     ws.emitServerMessage({ type: "reply_audio_end" });
@@ -431,7 +504,7 @@ describe("Session", () => {
     vi.stubGlobal("Audio", RejectingFakeAudio);
     const { ws } = await startAndOpenSession();
 
-    ws.emitServerMessage({ type: "reply_text", text: "Nice job!" });
+    ws.emitServerMessage({ type: "reply_text_delta", text: "Nice job!" });
 
     await waitFor(() => {
       expect(consoleError).toHaveBeenCalledWith("Failed to play reply audio", expect.any(Error));
@@ -471,7 +544,7 @@ describe("Session", () => {
   it("does not add a panel entry for a turn with no detected errors", async () => {
     const { ws } = await startAndOpenSession();
 
-    ws.emitServerMessage({ type: "reply_text", text: "Nice job!" });
+    ws.emitServerMessage({ type: "reply_text_delta", text: "Nice job!" });
     ws.emitServerMessage({ type: "reply_audio_end" });
 
     await waitFor(() => {
@@ -588,7 +661,7 @@ describe("Session", () => {
   it("stops playing reply audio and clears the buffer on a server barge-in signal", async () => {
     const { ws } = await startAndOpenSession();
 
-    ws.emitServerMessage({ type: "reply_text", text: "Nice job!" });
+    ws.emitServerMessage({ type: "reply_text_delta", text: "Nice job!" });
     FakeMediaSource.instances[0]!.open();
     ws.emitBinaryMessage(new Blob(["chunk"]));
 
@@ -597,13 +670,13 @@ describe("Session", () => {
     });
     const playingAudio = FakeAudio.instances[0]!;
 
-    ws.emitServerMessage({ type: "reply_interrupted" });
+    ws.emitServerMessage({ type: "reply_interrupted", reason: "barge_in" });
 
     expect(playingAudio.paused).toBe(true);
 
     // A subsequent reply's chunks shouldn't be mixed in with anything left over from the
     // interrupted one.
-    ws.emitServerMessage({ type: "reply_text", text: "Second reply" });
+    ws.emitServerMessage({ type: "reply_text_delta", text: "Second reply" });
     FakeMediaSource.instances[1]!.open();
     ws.emitBinaryMessage(new Blob(["second"]));
     ws.emitServerMessage({ type: "reply_audio_end" });
@@ -620,10 +693,10 @@ describe("Session", () => {
   it("ignores a chunk that arrives for a reply that was already interrupted", async () => {
     const { ws } = await startAndOpenSession();
 
-    ws.emitServerMessage({ type: "reply_text", text: "Nice job!" });
+    ws.emitServerMessage({ type: "reply_text_delta", text: "Nice job!" });
     const interruptedSource = FakeMediaSource.instances[0]!;
     interruptedSource.open();
-    ws.emitServerMessage({ type: "reply_interrupted" });
+    ws.emitServerMessage({ type: "reply_interrupted", reason: "barge_in" });
 
     // A stray chunk from the interrupted reply shows up late; it must not land in a fresh
     // MediaSource for whatever comes next, nor throw trying to append to the stale one.
@@ -635,7 +708,7 @@ describe("Session", () => {
   it("tolerates a barge-in signal when no reply is in progress", async () => {
     const { ws } = await startAndOpenSession();
 
-    ws.emitServerMessage({ type: "reply_interrupted" });
+    ws.emitServerMessage({ type: "reply_interrupted", reason: "barge_in" });
 
     expect(FakeAudio.instances).toHaveLength(0);
   });
@@ -643,12 +716,12 @@ describe("Session", () => {
   it("pauses safely on barge-in before any audio chunk has arrived", async () => {
     const { ws } = await startAndOpenSession();
 
-    ws.emitServerMessage({ type: "reply_text", text: "Nice job!" });
+    ws.emitServerMessage({ type: "reply_text_delta", text: "Nice job!" });
     await waitFor(() => {
       expect(FakeAudio.instances).toHaveLength(1);
     });
 
-    ws.emitServerMessage({ type: "reply_interrupted" });
+    ws.emitServerMessage({ type: "reply_interrupted", reason: "barge_in" });
 
     expect(FakeAudio.instances[0]?.paused).toBe(true);
   });
@@ -656,12 +729,12 @@ describe("Session", () => {
   it("starts a fresh audio buffer for each new reply", async () => {
     const { ws } = await startAndOpenSession();
 
-    ws.emitServerMessage({ type: "reply_text", text: "First reply" });
+    ws.emitServerMessage({ type: "reply_text_delta", text: "First reply" });
     FakeMediaSource.instances[0]!.open();
     ws.emitBinaryMessage(new Blob(["first-chunk"]));
     ws.emitServerMessage({ type: "reply_audio_end" });
 
-    ws.emitServerMessage({ type: "reply_text", text: "Second reply" });
+    ws.emitServerMessage({ type: "reply_text_delta", text: "Second reply" });
     FakeMediaSource.instances[1]!.open();
     ws.emitBinaryMessage(new Blob(["second"]));
     ws.emitServerMessage({ type: "reply_audio_end" });
