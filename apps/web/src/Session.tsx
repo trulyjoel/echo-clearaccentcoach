@@ -1,28 +1,27 @@
-import type { ClientToServerMessage, PersistedError, ServerToClientMessage } from "@callie/types";
+import type { ClientToServerMessage, ServerToClientMessage } from "@callie/types";
 import { useAuth } from "@clerk/react";
 import { type RefObject, useCallback, useEffect, useRef, useState } from "react";
 import { apiFetch, getApiBaseUrl } from "./api.js";
+import { ConversationThread } from "./ConversationThread.js";
+import {
+  appendAssistantDelta,
+  applyTranscript,
+  attachTurnErrors,
+  deriveCorrections,
+  endTurn,
+  finalizeAssistantText,
+  finalizeAssistantTurn,
+  interruptAssistantTurn,
+  type Turn,
+  type TurnCorrections,
+} from "./conversationTurns.js";
 import { CATEGORY_LABELS } from "./errorCategoryLabels.js";
-
-interface TurnCorrections {
-  turnId: string;
-  createdAt: string;
-  errors: PersistedError[];
-}
 
 type SessionState =
   | { status: "idle" }
   | { status: "starting" }
-  | {
-      status: "active";
-      sessionId: string;
-      finalized: string[];
-      interim: string;
-      corrections: TurnCorrections[];
-      /** Callie's in-progress or most recent reply, typed out live as `reply_text_delta` arrives */
-      replyCaption: string;
-    }
-  | { status: "ended"; finalized: string[]; corrections: TurnCorrections[] }
+  | { status: "active"; sessionId: string; turns: Turn[] }
+  | { status: "ended"; turns: Turn[] }
   | { status: "error"; message: string };
 
 /** Fetches an authenticated audio endpoint and plays the response, revoking the blob URL after. */
@@ -244,34 +243,24 @@ export function Session() {
     (message: ServerToClientMessage) => {
       switch (message.type) {
         case "session_started":
-          setState({
-            status: "active",
-            sessionId: message.sessionId,
-            finalized: [],
-            interim: "",
-            corrections: [],
-            replyCaption: "",
-          });
+          setState({ status: "active", sessionId: message.sessionId, turns: [] });
           return;
         case "transcript":
           setState((prev) => {
             if (prev.status !== "active") return prev;
-            return message.isFinal
-              ? { ...prev, finalized: [...prev.finalized, message.text], interim: "" }
-              : { ...prev, interim: message.text };
+            return { ...prev, turns: applyTranscript(prev.turns, message.text, message.isFinal) };
           });
           return;
         case "end_of_turn":
+          setState((prev) => {
+            if (prev.status !== "active") return prev;
+            return { ...prev, turns: endTurn(prev.turns) };
+          });
           return;
         case "turn_errors":
           setState((prev) => {
             if (prev.status !== "active" && prev.status !== "ended") return prev;
-            const correction: TurnCorrections = {
-              turnId: message.turnId,
-              createdAt: message.createdAt,
-              errors: message.errors,
-            };
-            return { ...prev, corrections: [...prev.corrections, correction] };
+            return { ...prev, turns: attachTurnErrors(prev.turns, message.errors, message.createdAt) };
           });
           return;
         case "reply_text_delta": {
@@ -290,8 +279,7 @@ export function Session() {
           }
           setState((prev) => {
             if (prev.status !== "active") return prev;
-            const replyCaption = isFirstDelta ? message.text : prev.replyCaption + message.text;
-            return { ...prev, replyCaption };
+            return { ...prev, turns: appendAssistantDelta(prev.turns, message.text) };
           });
           return;
         }
@@ -300,13 +288,17 @@ export function Session() {
           // accumulated deltas produced, in case of any drift.
           setState((prev) => {
             if (prev.status !== "active") return prev;
-            return { ...prev, replyCaption: message.text };
+            return { ...prev, turns: finalizeAssistantText(prev.turns, message.text) };
           });
           return;
         case "reply_audio_end": {
           awaitingReplySessionRef.current = true;
           const session = replyAudioRef.current;
           if (session) enqueue(session, () => finishReplyAudioStream(session));
+          setState((prev) => {
+            if (prev.status !== "active") return prev;
+            return { ...prev, turns: finalizeAssistantTurn(prev.turns) };
+          });
           return;
         }
         case "reply_interrupted": {
@@ -318,23 +310,17 @@ export function Session() {
             URL.revokeObjectURL(session.url);
           }
           replyAudioRef.current = undefined;
-          // Barge-in means the user is about to speak over it — the cut-short caption is no
-          // longer relevant, so it's cleared. A pipeline error leaves it in place (alongside the
-          // separate `error` message's banner) since the text generated so far is still valid.
-          if (message.reason === "barge_in") {
-            setState((prev) => {
-              if (prev.status !== "active") return prev;
-              return { ...prev, replyCaption: "" };
-            });
-          }
+          setState((prev) => {
+            if (prev.status !== "active") return prev;
+            return { ...prev, turns: interruptAssistantTurn(prev.turns, message.reason) };
+          });
           return;
         }
         case "session_ended":
           cleanupMedia();
           setState((prev) => ({
             status: "ended",
-            finalized: prev.status === "active" ? prev.finalized : [],
-            corrections: prev.status === "active" ? prev.corrections : [],
+            turns: prev.status === "active" ? prev.turns : [],
           }));
           return;
         case "error":
@@ -405,12 +391,16 @@ export function Session() {
       if (prev.status !== "active" && prev.status !== "ended") return prev;
       return {
         ...prev,
-        corrections: prev.corrections.map((correction) => ({
-          ...correction,
-          errors: correction.errors.map((error) =>
-            error.id === errorId ? { ...error, bookmarked } : error,
-          ),
-        })),
+        turns: prev.turns.map((turn) =>
+          turn.kind === "user" && turn.errors
+            ? {
+                ...turn,
+                errors: turn.errors.map((error) =>
+                  error.id === errorId ? { ...error, bookmarked } : error,
+                ),
+              }
+            : turn,
+        ),
       };
     });
   }, []);
@@ -425,7 +415,12 @@ export function Session() {
   return (
     <section>
       {state.status === "idle" && (
-        <button onClick={() => void startSession()}>Start session</button>
+        <button
+          className="rounded-md bg-lavender-600 px-4 py-2 text-white"
+          onClick={() => void startSession()}
+        >
+          Start session
+        </button>
       )}
       {state.status === "starting" && <p>Connecting...</p>}
       {state.status === "error" && (
@@ -438,10 +433,9 @@ export function Session() {
         <>
           <button onClick={stopSession}>Stop session</button>
           {serverError && <p role="alert">{serverError}</p>}
-          <p>{[...state.finalized, state.interim].filter(Boolean).join(" ")}</p>
-          {state.replyCaption && <p>{state.replyCaption}</p>}
+          <ConversationThread turns={state.turns} />
           <CorrectionsPanel
-            corrections={state.corrections}
+            corrections={deriveCorrections(state.turns)}
             getToken={getToken}
             onBookmarkToggled={handleBookmarkToggled}
           />
@@ -450,9 +444,9 @@ export function Session() {
       {state.status === "ended" && (
         <>
           <p>Session ended.</p>
-          <p>{state.finalized.join(" ")}</p>
+          <ConversationThread turns={state.turns} />
           <CorrectionsPanel
-            corrections={state.corrections}
+            corrections={deriveCorrections(state.turns)}
             getToken={getToken}
             onBookmarkToggled={handleBookmarkToggled}
           />

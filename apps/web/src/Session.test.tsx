@@ -186,6 +186,12 @@ async function startAndOpenSession(): Promise<{
   return { user, ws };
 }
 
+/** Emits a realistic completed user turn: a finalized transcript followed by its turn boundary. */
+function emitUserTurn(ws: FakeWebSocket, text: string): void {
+  ws.emitServerMessage({ type: "transcript", text, isFinal: true });
+  ws.emitServerMessage({ type: "end_of_turn" });
+}
+
 describe("Session", () => {
   beforeEach(() => {
     FakeMediaRecorder.instances = [];
@@ -250,6 +256,26 @@ describe("Session", () => {
     await waitFor(() => {
       expect(screen.getByText("hello there")).toBeInTheDocument();
     });
+  });
+
+  it("keeps every past turn visible as the conversation continues, instead of overwriting it", async () => {
+    const { ws } = await startAndOpenSession();
+
+    ws.emitServerMessage({ type: "transcript", text: "hello there", isFinal: true });
+    ws.emitServerMessage({ type: "end_of_turn" });
+    ws.emitServerMessage({ type: "reply_text_delta", text: "Hi! How are you?" });
+    ws.emitServerMessage({ type: "reply_text", text: "Hi! How are you?" });
+    ws.emitServerMessage({ type: "reply_audio_end" });
+    await screen.findByText("Hi! How are you?");
+
+    ws.emitServerMessage({ type: "transcript", text: "I am good", isFinal: true });
+
+    await waitFor(() => {
+      expect(screen.getByText("I am good")).toBeInTheDocument();
+    });
+    // Both the first turn's transcript and Callie's reply are still on screen, not overwritten.
+    expect(screen.getByText("hello there")).toBeInTheDocument();
+    expect(screen.getByText("Hi! How are you?")).toBeInTheDocument();
   });
 
   it("sends end_session and shows the ended state when the server confirms", async () => {
@@ -516,6 +542,7 @@ describe("Session", () => {
   it("renders a turn's detected errors in the correction panel", async () => {
     const { ws } = await startAndOpenSession();
 
+    emitUserTurn(ws, "test turn");
     ws.emitServerMessage({
       type: "turn_errors",
       turnId: "turn-1",
@@ -556,6 +583,7 @@ describe("Session", () => {
   it("associates each panel entry with the turn it came from", async () => {
     const { ws } = await startAndOpenSession();
 
+    emitUserTurn(ws, "first turn");
     ws.emitServerMessage({
       type: "turn_errors",
       turnId: "turn-1",
@@ -572,6 +600,7 @@ describe("Session", () => {
         },
       ],
     });
+    emitUserTurn(ws, "second turn");
     ws.emitServerMessage({
       type: "turn_errors",
       turnId: "turn-2",
@@ -599,6 +628,7 @@ describe("Session", () => {
   it("keeps the correction panel visible after the session ends", async () => {
     const { ws } = await startAndOpenSession();
 
+    emitUserTurn(ws, "test turn");
     ws.emitServerMessage({
       type: "turn_errors",
       turnId: "turn-1",
@@ -630,6 +660,7 @@ describe("Session", () => {
   it("still appends a turn_errors frame that arrives after the session has ended", async () => {
     const { ws } = await startAndOpenSession();
 
+    emitUserTurn(ws, "test turn");
     await userEvent.setup().click(screen.getByRole("button", { name: "Stop session" }));
     ws.emitServerMessage({ type: "session_ended", reason: "user_ended" });
     await waitFor(() => {
@@ -762,6 +793,7 @@ describe("Session", () => {
 
     async function emitOneError(hasClip: boolean, bookmarked = false): Promise<FakeWebSocket> {
       const { ws } = await startAndOpenSession();
+      emitUserTurn(ws, "test turn");
       ws.emitServerMessage({
         type: "turn_errors",
         turnId: "turn-1",
@@ -867,6 +899,7 @@ describe("Session", () => {
 
     async function emitOneError(hasClip: boolean, bookmarked: boolean): Promise<FakeWebSocket> {
       const { ws } = await startAndOpenSession();
+      emitUserTurn(ws, "test turn");
       ws.emitServerMessage({
         type: "turn_errors",
         turnId: "turn-1",
