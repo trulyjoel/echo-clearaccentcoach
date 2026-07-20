@@ -1,0 +1,14 @@
+@import "tailwindcss";
+
+@theme {
+  --color-lavender-50: #f6f4fd;
+  --color-lavender-100: #ece7fb;
+  --color-lavender-200: #d9d0f7;
+  --color-lavender-300: #beadef;
+  --color-lavender-400: #9d84e3;
+  --color-lavender-500: #7f5fd4;
+  --color-lavender-600: #6947b8;
+  --color-lavender-700: #543795;
+  --color-lavender-800: #402c72;
+  --color-lavender-900: #2e2153;
+}
