@@ -74,34 +74,65 @@ function CorrectionsPanel({
   }
 
   return (
-    <aside aria-label="Corrections">
-      {playbackError && <p role="alert">{playbackError}</p>}
-      {bookmarkError && <p role="alert">{bookmarkError}</p>}
-      <ul>
+    <aside
+      aria-label="Corrections"
+      className="flex flex-col gap-3 rounded-lg border border-lavender-200 bg-lavender-50 p-4"
+    >
+      {playbackError && (
+        <p role="alert" className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">
+          {playbackError}
+        </p>
+      )}
+      {bookmarkError && (
+        <p role="alert" className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">
+          {bookmarkError}
+        </p>
+      )}
+      <ul className="flex flex-col gap-3">
         {corrections.flatMap((correction) =>
           correction.errors.map((error) => (
-            <li key={error.id}>
-              <time dateTime={correction.createdAt}>
-                {new Date(correction.createdAt).toLocaleTimeString()}
-              </time>
-              <strong>{CATEGORY_LABELS[error.category]}</strong>
-              <p>
-                <span>{error.original}</span> → <span>{error.corrected}</span>
+            <li
+              key={error.id}
+              className="flex flex-col gap-2 rounded-md border border-lavender-200 bg-white p-3 shadow-sm"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="rounded-full bg-lavender-100 px-2 py-0.5 text-xs font-medium text-lavender-800">
+                  {CATEGORY_LABELS[error.category]}
+                </span>
+                <time dateTime={correction.createdAt} className="text-xs text-lavender-500">
+                  {new Date(correction.createdAt).toLocaleTimeString()}
+                </time>
+              </div>
+              <p className="text-sm">
+                <span className="text-lavender-500 line-through">{error.original}</span>{" "}
+                <span aria-hidden="true">→</span>{" "}
+                <span className="font-medium text-lavender-900">{error.corrected}</span>
               </p>
-              <p>{error.explanation}</p>
-              {error.hasClip && (
-                <button onClick={() => void play(`/api/errors/${error.id}/clip`)}>
-                  Play my clip
+              <p className="text-sm text-lavender-700">{error.explanation}</p>
+              <div className="flex flex-wrap gap-2 pt-1">
+                {error.hasClip && (
+                  <button
+                    className="rounded-md border border-lavender-300 px-3 py-1 text-sm text-lavender-700 hover:bg-lavender-100"
+                    onClick={() => void play(`/api/errors/${error.id}/clip`)}
+                  >
+                    Play my clip
+                  </button>
+                )}
+                <button
+                  className="rounded-md border border-lavender-300 px-3 py-1 text-sm text-lavender-700 hover:bg-lavender-100"
+                  onClick={() => void play(`/api/errors/${error.id}/target-audio`)}
+                >
+                  Play target
                 </button>
-              )}
-              <button onClick={() => void play(`/api/errors/${error.id}/target-audio`)}>
-                Play target
-              </button>
-              {error.hasClip && (
-                <button onClick={() => void bookmark(error.id)}>
-                  {error.bookmarked ? "Un-bookmark clip" : "Bookmark clip"}
-                </button>
-              )}
+                {error.hasClip && (
+                  <button
+                    className="rounded-md border border-lavender-300 px-3 py-1 text-sm text-lavender-700 hover:bg-lavender-100"
+                    onClick={() => void bookmark(error.id)}
+                  >
+                    {error.bookmarked ? "Un-bookmark clip" : "Bookmark clip"}
+                  </button>
+                )}
+              </div>
             </li>
           )),
         )}
@@ -413,26 +444,42 @@ export function Session() {
   }, [cleanupMedia]);
 
   return (
-    <section>
+    <section className="mx-auto flex max-w-2xl flex-col gap-4 p-4">
       {state.status === "idle" && (
         <button
-          className="rounded-md bg-lavender-600 px-4 py-2 text-white"
+          className="self-start rounded-md bg-lavender-600 px-4 py-2 font-medium text-white hover:bg-lavender-700"
           onClick={() => void startSession()}
         >
           Start session
         </button>
       )}
-      {state.status === "starting" && <p>Connecting...</p>}
+      {state.status === "starting" && <p className="text-lavender-700">Connecting...</p>}
       {state.status === "error" && (
         <>
-          <p role="alert">{state.message}</p>
-          <button onClick={() => void startSession()}>Try again</button>
+          <p role="alert" className="rounded-md bg-red-50 px-3 py-2 text-red-700">
+            {state.message}
+          </p>
+          <button
+            className="self-start rounded-md bg-lavender-600 px-4 py-2 font-medium text-white hover:bg-lavender-700"
+            onClick={() => void startSession()}
+          >
+            Try again
+          </button>
         </>
       )}
       {state.status === "active" && (
         <>
-          <button onClick={stopSession}>Stop session</button>
-          {serverError && <p role="alert">{serverError}</p>}
+          <button
+            className="self-start rounded-md border border-lavender-300 px-4 py-2 font-medium text-lavender-700 hover:bg-lavender-100"
+            onClick={stopSession}
+          >
+            Stop session
+          </button>
+          {serverError && (
+            <p role="alert" className="rounded-md bg-red-50 px-3 py-2 text-red-700">
+              {serverError}
+            </p>
+          )}
           <ConversationThread turns={state.turns} />
           <CorrectionsPanel
             corrections={deriveCorrections(state.turns)}
@@ -443,14 +490,19 @@ export function Session() {
       )}
       {state.status === "ended" && (
         <>
-          <p>Session ended.</p>
+          <p className="text-lavender-700">Session ended.</p>
           <ConversationThread turns={state.turns} />
           <CorrectionsPanel
             corrections={deriveCorrections(state.turns)}
             getToken={getToken}
             onBookmarkToggled={handleBookmarkToggled}
           />
-          <button onClick={() => void startSession()}>Start new session</button>
+          <button
+            className="self-start rounded-md bg-lavender-600 px-4 py-2 font-medium text-white hover:bg-lavender-700"
+            onClick={() => void startSession()}
+          >
+            Start new session
+          </button>
         </>
       )}
     </section>
