@@ -1,4 +1,4 @@
-import type { ClientToServerMessage, ServerToClientMessage } from "@callie/types";
+import type { ClientToServerMessage, PersistedError, ServerToClientMessage } from "@callie/types";
 import { useAuth } from "@clerk/react";
 import { type RefObject, useCallback, useEffect, useRef, useState } from "react";
 import { apiFetch, getApiBaseUrl } from "./api.js";
@@ -24,6 +24,21 @@ type SessionState =
   | { status: "ended"; turns: Turn[] }
   | { status: "error"; message: string };
 
+const PRIMARY_BUTTON_CLASS =
+  "self-start rounded-md bg-lavender-600 px-4 py-2 font-medium text-white " +
+  "hover:bg-lavender-700";
+const OUTLINE_BUTTON_CLASS =
+  "rounded-md border border-lavender-300 px-3 py-1 text-sm text-lavender-700 " +
+  "hover:bg-lavender-100";
+const SECONDARY_BUTTON_CLASS =
+  "self-start rounded-md border border-lavender-300 px-4 py-2 font-medium " +
+  "text-lavender-700 hover:bg-lavender-100";
+const ALERT_CLASS = "rounded-md bg-red-50 px-3 py-2 text-sm text-red-700";
+const CORRECTION_ENTRY_CLASS =
+  "flex flex-col gap-2 rounded-md border bg-white p-3 shadow-sm transition-colors";
+const CATEGORY_BADGE_CLASS =
+  "rounded-full bg-lavender-100 px-2 py-0.5 text-xs font-medium text-lavender-800";
+
 /** Fetches an authenticated audio endpoint and plays the response, revoking the blob URL after. */
 async function fetchAndPlayAudio(path: string, token: string | null): Promise<void> {
   const response = await apiFetch(path, token);
@@ -38,6 +53,63 @@ async function toggleBookmark(errorId: string, token: string | null): Promise<bo
   const response = await apiFetch(`/api/errors/${errorId}/bookmark`, token, { method: "PATCH" });
   const body = (await response.json()) as { bookmarked: boolean };
   return body.bookmarked;
+}
+
+function CorrectionEntry({
+  error,
+  createdAt,
+  highlighted,
+  onPlay,
+  onBookmark,
+}: {
+  error: PersistedError;
+  createdAt: string;
+  highlighted: boolean;
+  onPlay: (path: string) => void;
+  onBookmark: (errorId: string) => void;
+}) {
+  return (
+    <li
+      id={`correction-${error.id}`}
+      className={`${CORRECTION_ENTRY_CLASS} ${
+        highlighted ? "border-lavender-500 ring-2 ring-lavender-400" : "border-lavender-200"
+      }`}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <span className={CATEGORY_BADGE_CLASS}>{CATEGORY_LABELS[error.category]}</span>
+        <time dateTime={createdAt} className="text-xs text-lavender-500">
+          {new Date(createdAt).toLocaleTimeString()}
+        </time>
+      </div>
+      <p className="text-sm">
+        <span className="text-lavender-500 line-through">{error.original}</span>{" "}
+        <span aria-hidden="true">→</span>{" "}
+        <span className="font-medium text-lavender-900">{error.corrected}</span>
+      </p>
+      <p className="text-sm text-lavender-700">{error.explanation}</p>
+      <div className="flex flex-wrap gap-2 pt-1">
+        {error.hasClip && (
+          <button
+            className={OUTLINE_BUTTON_CLASS}
+            onClick={() => onPlay(`/api/errors/${error.id}/clip`)}
+          >
+            Play my clip
+          </button>
+        )}
+        <button
+          className={OUTLINE_BUTTON_CLASS}
+          onClick={() => onPlay(`/api/errors/${error.id}/target-audio`)}
+        >
+          Play target
+        </button>
+        {error.hasClip && (
+          <button className={OUTLINE_BUTTON_CLASS} onClick={() => onBookmark(error.id)}>
+            {error.bookmarked ? "Un-bookmark clip" : "Bookmark clip"}
+          </button>
+        )}
+      </div>
+    </li>
+  );
 }
 
 function CorrectionsPanel({
@@ -81,66 +153,26 @@ function CorrectionsPanel({
       className="flex flex-col gap-3 rounded-lg border border-lavender-200 bg-lavender-50 p-4"
     >
       {playbackError && (
-        <p role="alert" className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">
+        <p role="alert" className={ALERT_CLASS}>
           {playbackError}
         </p>
       )}
       {bookmarkError && (
-        <p role="alert" className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">
+        <p role="alert" className={ALERT_CLASS}>
           {bookmarkError}
         </p>
       )}
       <ul className="flex flex-col gap-3">
         {corrections.flatMap((correction) =>
           correction.errors.map((error) => (
-            <li
+            <CorrectionEntry
               key={error.id}
-              id={`correction-${error.id}`}
-              className={`flex flex-col gap-2 rounded-md border bg-white p-3 shadow-sm transition-colors ${
-                error.id === highlightedErrorId
-                  ? "border-lavender-500 ring-2 ring-lavender-400"
-                  : "border-lavender-200"
-              }`}
-            >
-              <div className="flex items-center justify-between gap-2">
-                <span className="rounded-full bg-lavender-100 px-2 py-0.5 text-xs font-medium text-lavender-800">
-                  {CATEGORY_LABELS[error.category]}
-                </span>
-                <time dateTime={correction.createdAt} className="text-xs text-lavender-500">
-                  {new Date(correction.createdAt).toLocaleTimeString()}
-                </time>
-              </div>
-              <p className="text-sm">
-                <span className="text-lavender-500 line-through">{error.original}</span>{" "}
-                <span aria-hidden="true">→</span>{" "}
-                <span className="font-medium text-lavender-900">{error.corrected}</span>
-              </p>
-              <p className="text-sm text-lavender-700">{error.explanation}</p>
-              <div className="flex flex-wrap gap-2 pt-1">
-                {error.hasClip && (
-                  <button
-                    className="rounded-md border border-lavender-300 px-3 py-1 text-sm text-lavender-700 hover:bg-lavender-100"
-                    onClick={() => void play(`/api/errors/${error.id}/clip`)}
-                  >
-                    Play my clip
-                  </button>
-                )}
-                <button
-                  className="rounded-md border border-lavender-300 px-3 py-1 text-sm text-lavender-700 hover:bg-lavender-100"
-                  onClick={() => void play(`/api/errors/${error.id}/target-audio`)}
-                >
-                  Play target
-                </button>
-                {error.hasClip && (
-                  <button
-                    className="rounded-md border border-lavender-300 px-3 py-1 text-sm text-lavender-700 hover:bg-lavender-100"
-                    onClick={() => void bookmark(error.id)}
-                  >
-                    {error.bookmarked ? "Un-bookmark clip" : "Bookmark clip"}
-                  </button>
-                )}
-              </div>
-            </li>
+              error={error}
+              createdAt={correction.createdAt}
+              highlighted={error.id === highlightedErrorId}
+              onPlay={(path) => void play(path)}
+              onBookmark={(errorId) => void bookmark(errorId)}
+            />
           )),
         )}
       </ul>
@@ -299,7 +331,10 @@ export function Session() {
         case "turn_errors":
           setState((prev) => {
             if (prev.status !== "active" && prev.status !== "ended") return prev;
-            return { ...prev, turns: attachTurnErrors(prev.turns, message.errors, message.createdAt) };
+            return {
+              ...prev,
+              turns: attachTurnErrors(prev.turns, message.errors, message.createdAt),
+            };
           });
           return;
         case "reply_text_delta": {
@@ -466,37 +501,28 @@ export function Session() {
   return (
     <section className="mx-auto flex max-w-2xl flex-col gap-4 p-4">
       {state.status === "idle" && (
-        <button
-          className="self-start rounded-md bg-lavender-600 px-4 py-2 font-medium text-white hover:bg-lavender-700"
-          onClick={() => void startSession()}
-        >
+        <button className={PRIMARY_BUTTON_CLASS} onClick={() => void startSession()}>
           Start session
         </button>
       )}
       {state.status === "starting" && <p className="text-lavender-700">Connecting...</p>}
       {state.status === "error" && (
         <>
-          <p role="alert" className="rounded-md bg-red-50 px-3 py-2 text-red-700">
+          <p role="alert" className={ALERT_CLASS}>
             {state.message}
           </p>
-          <button
-            className="self-start rounded-md bg-lavender-600 px-4 py-2 font-medium text-white hover:bg-lavender-700"
-            onClick={() => void startSession()}
-          >
+          <button className={PRIMARY_BUTTON_CLASS} onClick={() => void startSession()}>
             Try again
           </button>
         </>
       )}
       {state.status === "active" && (
         <>
-          <button
-            className="self-start rounded-md border border-lavender-300 px-4 py-2 font-medium text-lavender-700 hover:bg-lavender-100"
-            onClick={stopSession}
-          >
+          <button className={SECONDARY_BUTTON_CLASS} onClick={stopSession}>
             Stop session
           </button>
           {serverError && (
-            <p role="alert" className="rounded-md bg-red-50 px-3 py-2 text-red-700">
+            <p role="alert" className={ALERT_CLASS}>
               {serverError}
             </p>
           )}
@@ -519,10 +545,7 @@ export function Session() {
             onBookmarkToggled={handleBookmarkToggled}
             highlightedErrorId={highlightedErrorId}
           />
-          <button
-            className="self-start rounded-md bg-lavender-600 px-4 py-2 font-medium text-white hover:bg-lavender-700"
-            onClick={() => void startSession()}
-          >
+          <button className={PRIMARY_BUTTON_CLASS} onClick={() => void startSession()}>
             Start new session
           </button>
         </>

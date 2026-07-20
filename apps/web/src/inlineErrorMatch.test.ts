@@ -1,19 +1,6 @@
-import type { PersistedError } from "@callie/types";
 import { describe, expect, it } from "vitest";
 import { matchFlaggedSpans, splitIntoSegments } from "./inlineErrorMatch.js";
-
-function makeError(overrides: Partial<PersistedError> = {}): PersistedError {
-  return {
-    id: "error-1",
-    hasClip: false,
-    bookmarked: false,
-    category: "word_order",
-    original: "go I",
-    corrected: "I go",
-    explanation: "Subject comes before the verb.",
-    ...overrides,
-  };
-}
+import { makeError } from "./testFixtures.js";
 
 describe("matchFlaggedSpans", () => {
   it("finds an error's flagged text verbatim in the turn's text", () => {
@@ -27,7 +14,7 @@ describe("matchFlaggedSpans", () => {
     expect(matchFlaggedSpans("something completely different", [error])).toEqual([]);
   });
 
-  it("matches multiple non-overlapping errors, sorted left to right regardless of input order", () => {
+  it("matches non-overlapping errors, sorted left to right regardless of input order", () => {
     const errorA = makeError({ id: "error-a", original: "she go" });
     const errorB = makeError({ id: "error-b", original: "I saw" });
     const matches = matchFlaggedSpans("I saw her and she go home", [errorA, errorB]);
@@ -45,7 +32,7 @@ describe("matchFlaggedSpans", () => {
     expect(matches).toEqual([{ start: 0, end: 5, error: errorA }]);
   });
 
-  it("finds a later non-overlapping occurrence of the same text when an earlier one is taken", () => {
+  it("finds a later non-overlapping occurrence when an earlier one is already taken", () => {
     const errorA = makeError({ id: "error-a", original: "go" });
     const errorB = makeError({ id: "error-b", original: "go" });
     const matches = matchFlaggedSpans("go go", [errorA, errorB]);

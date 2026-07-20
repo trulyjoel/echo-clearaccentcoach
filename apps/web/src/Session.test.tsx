@@ -258,7 +258,7 @@ describe("Session", () => {
     });
   });
 
-  it("keeps every past turn visible as the conversation continues, instead of overwriting it", async () => {
+  it("keeps every past turn visible as the conversation continues", async () => {
     const { ws } = await startAndOpenSession();
 
     ws.emitServerMessage({ type: "transcript", text: "hello there", isFinal: true });
@@ -368,7 +368,7 @@ describe("Session", () => {
     expect(FakeMediaSource.instances).toHaveLength(1);
   });
 
-  it("shows a typing indicator the instant the user's turn ends, before any reply text arrives", async () => {
+  it("shows a typing indicator the instant the user's turn ends", async () => {
     const { ws } = await startAndOpenSession();
 
     ws.emitServerMessage({ type: "transcript", text: "hello there", isFinal: true });
@@ -437,7 +437,7 @@ describe("Session", () => {
     expect(screen.queryByText("First replySecond reply")).not.toBeInTheDocument();
   });
 
-  it("keeps a reply's streamed-so-far text, marked as cut off, on barge-in or a pipeline error", async () => {
+  it("keeps a reply's streamed text, marked cut off, on barge-in or a pipeline error", async () => {
     const { ws } = await startAndOpenSession();
 
     ws.emitServerMessage({ type: "reply_text_delta", text: "Nice job" });
@@ -586,7 +586,7 @@ describe("Session", () => {
     expect(screen.getByText("Subject-verb agreement")).toBeInTheDocument();
   });
 
-  it("scrolls to and highlights the corrections panel entry when its flagged span is clicked", async () => {
+  it("scrolls to and highlights the panel entry when its flagged span is clicked", async () => {
     const scrollIntoView = vi
       .spyOn(HTMLElement.prototype, "scrollIntoView")
       .mockImplementation(() => {});

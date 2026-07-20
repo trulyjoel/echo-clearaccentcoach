@@ -4,19 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { ConversationThread } from "./ConversationThread.js";
 import type { Turn, UserTurn } from "./conversationTurns.js";
-
-function makeError(overrides: Partial<PersistedError> = {}): PersistedError {
-  return {
-    id: "error-1",
-    hasClip: false,
-    bookmarked: false,
-    category: "word_order",
-    original: "go I",
-    corrected: "I go",
-    explanation: "Subject comes before the verb.",
-    ...overrides,
-  };
-}
+import { makeError } from "./testFixtures.js";
 
 describe("ConversationThread", () => {
   it("renders every turn's text in order", () => {
@@ -77,9 +65,7 @@ describe("ConversationThread", () => {
     Object.defineProperty(log, "scrollHeight", { configurable: true, value: 400 });
 
     rerender(
-      <ConversationThread
-        turns={[{ kind: "assistant", status: "final", text: "Nice job!" }]}
-      />,
+      <ConversationThread turns={[{ kind: "assistant", status: "final", text: "Nice job!" }]} />,
     );
 
     expect(log.scrollTop).toBe(400);

@@ -3,13 +3,21 @@ import type { AssistantTurn, Turn, UserTurn } from "./conversationTurns.js";
 import { userTurnText } from "./conversationTurns.js";
 import { matchFlaggedSpans, splitIntoSegments } from "./inlineErrorMatch.js";
 
-/** Three bouncing dots shown in Callie's bubble position while her reply is still being generated. */
+const TYPING_DOT_CLASS = "h-2 w-2 animate-bounce rounded-full bg-lavender-400";
+const FLAGGED_SPAN_CLASS =
+  "cursor-pointer underline decoration-wavy decoration-2 decoration-red-400 underline-offset-4";
+const USER_BUBBLE_CLASS =
+  "max-w-[75%] rounded-2xl rounded-br-sm bg-violet-600 px-4 py-2 text-white";
+const ASSISTANT_BUBBLE_CLASS =
+  "max-w-[75%] rounded-2xl rounded-bl-sm bg-lavender-100 px-4 py-2 text-lavender-900";
+
+/** Three bouncing dots shown in Callie's bubble position while her reply is still generating. */
 function TypingIndicator() {
   return (
     <span role="status" aria-label="Callie is typing" className="flex items-center gap-1 px-1 py-1">
-      <span className="h-2 w-2 animate-bounce rounded-full bg-lavender-400 [animation-delay:-0.3s]" />
-      <span className="h-2 w-2 animate-bounce rounded-full bg-lavender-400 [animation-delay:-0.15s]" />
-      <span className="h-2 w-2 animate-bounce rounded-full bg-lavender-400" />
+      <span className={`${TYPING_DOT_CLASS} [animation-delay:-0.3s]`} />
+      <span className={`${TYPING_DOT_CLASS} [animation-delay:-0.15s]`} />
+      <span className={TYPING_DOT_CLASS} />
     </span>
   );
 }
@@ -47,7 +55,7 @@ function UserBubbleContent({
         segment.error ? (
           <span
             key={index}
-            className="cursor-pointer underline decoration-wavy decoration-2 decoration-red-400 underline-offset-4"
+            className={FLAGGED_SPAN_CLASS}
             title={`${segment.error.corrected} — ${segment.error.explanation}`}
             onClick={() => onFlaggedSpanClick?.(segment.error!.id)}
           >
@@ -71,7 +79,7 @@ function TurnBubble({
   if (turn.kind === "user") {
     return (
       <div className="flex justify-end">
-        <p className="max-w-[75%] rounded-2xl rounded-br-sm bg-violet-600 px-4 py-2 text-white">
+        <p className={USER_BUBBLE_CLASS}>
           <UserBubbleContent turn={turn} onFlaggedSpanClick={onFlaggedSpanClick} />
         </p>
       </div>
@@ -80,7 +88,7 @@ function TurnBubble({
 
   return (
     <div className="flex justify-start">
-      <p className="max-w-[75%] rounded-2xl rounded-bl-sm bg-lavender-100 px-4 py-2 text-lavender-900">
+      <p className={ASSISTANT_BUBBLE_CLASS}>
         <AssistantBubbleContent turn={turn} />
       </p>
     </div>

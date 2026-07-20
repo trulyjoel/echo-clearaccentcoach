@@ -67,13 +67,17 @@ export function endTurn(turns: readonly Turn[]): Turn[] {
 export function appendAssistantDelta(turns: readonly Turn[], delta: string): Turn[] {
   const last = lastTurn(turns);
   if (last?.kind === "assistant" && last.status !== "final" && last.status !== "interrupted") {
-    const updated: AssistantTurn = { kind: "assistant", status: "streaming", text: last.text + delta };
+    const updated: AssistantTurn = {
+      kind: "assistant",
+      status: "streaming",
+      text: last.text + delta,
+    };
     return [...turns.slice(0, -1), updated];
   }
   return [...turns, { kind: "assistant", status: "streaming", text: delta }];
 }
 
-/** Replaces Callie's in-progress reply text with the authoritative full string from `reply_text`. */
+/** Replaces Callie's in-progress reply text with the authoritative full string once it arrives. */
 export function finalizeAssistantText(turns: readonly Turn[], text: string): Turn[] {
   const last = lastTurn(turns);
   if (last?.kind !== "assistant") return turns.slice();

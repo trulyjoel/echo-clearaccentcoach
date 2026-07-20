@@ -1,4 +1,3 @@
-import type { PersistedError } from "@callie/types";
 import { describe, expect, it } from "vitest";
 import {
   appendAssistantDelta,
@@ -12,19 +11,7 @@ import {
   type Turn,
   userTurnText,
 } from "./conversationTurns.js";
-
-function makeError(overrides: Partial<PersistedError> = {}): PersistedError {
-  return {
-    id: "error-1",
-    hasClip: false,
-    bookmarked: false,
-    category: "word_order",
-    original: "go I",
-    corrected: "I go",
-    explanation: "Subject comes before the verb.",
-    ...overrides,
-  };
-}
+import { makeError } from "./testFixtures.js";
 
 describe("applyTranscript", () => {
   it("starts a new live user turn with an interim tail when none is open", () => {
@@ -66,7 +53,10 @@ describe("applyTranscript", () => {
   it("starts a fresh user turn once the previous one closed out", () => {
     const closed: Turn = { kind: "assistant", status: "final", text: "Nice!" };
     const turns = applyTranscript([closed], "next turn", false);
-    expect(turns).toEqual([closed, { kind: "user", status: "live", finalizedText: "", interimText: "next turn" }]);
+    expect(turns).toEqual([
+      closed,
+      { kind: "user", status: "live", finalizedText: "", interimText: "next turn" },
+    ]);
   });
 });
 
@@ -89,7 +79,10 @@ describe("endTurn", () => {
 
 describe("appendAssistantDelta", () => {
   it("transitions a pending turn to streaming with the first delta", () => {
-    const turns = appendAssistantDelta([{ kind: "assistant", status: "pending", text: "" }], "Nice ");
+    const turns = appendAssistantDelta(
+      [{ kind: "assistant", status: "pending", text: "" }],
+      "Nice ",
+    );
     expect(turns).toEqual([{ kind: "assistant", status: "streaming", text: "Nice " }]);
   });
 
@@ -134,7 +127,9 @@ describe("finalizeAssistantText", () => {
 
 describe("finalizeAssistantTurn", () => {
   it("marks the in-progress assistant turn final", () => {
-    const turns = finalizeAssistantTurn([{ kind: "assistant", status: "streaming", text: "Nice job!" }]);
+    const turns = finalizeAssistantTurn([
+      { kind: "assistant", status: "streaming", text: "Nice job!" },
+    ]);
     expect(turns).toEqual([{ kind: "assistant", status: "final", text: "Nice job!" }]);
   });
 
@@ -145,7 +140,9 @@ describe("finalizeAssistantTurn", () => {
 
 describe("interruptAssistantTurn", () => {
   it("keeps whatever text had streamed so far, marked interrupted", () => {
-    const turns = interruptAssistantTurn([{ kind: "assistant", status: "streaming", text: "Nice job" }]);
+    const turns = interruptAssistantTurn([
+      { kind: "assistant", status: "streaming", text: "Nice job" },
+    ]);
     expect(turns).toEqual([{ kind: "assistant", status: "interrupted", text: "Nice job" }]);
   });
 
