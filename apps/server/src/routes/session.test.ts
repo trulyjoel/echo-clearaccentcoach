@@ -753,6 +753,44 @@ describe("turn-based reply loop", () => {
     await app.close();
   });
 
+  it("does not send a second end_of_turn for the UtteranceEnd that follows speech_final", async () => {
+    await giveConsent();
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    await queue.next(); // session_started
+
+    emitSpeechFinal("hello Callie");
+    await queue.next(); // transcript
+    await queue.next(); // end_of_turn
+
+    deepgramTestState.getLatest()?.emitMessage({ type: "UtteranceEnd" });
+
+    // Drain the one legitimate turn's pipeline.
+    await queue.next(); // reply_text_delta
+    await queue.next(); // audio chunk
+    await queue.next(); // audio chunk
+    await queue.next(); // reply_text
+    await queue.next(); // reply_audio_end
+
+    // Nothing else should arrive — in particular, no second end_of_turn from the UtteranceEnd.
+    const raceResult = await Promise.race([
+      queue.next().then((frame) => ({ timedOut: false, frame })),
+      new Promise((resolve) => setTimeout(resolve, 50)).then(() => ({
+        timedOut: true,
+        frame: undefined,
+      })),
+    ]);
+    expect(raceResult).toEqual({ timedOut: true, frame: undefined });
+
+    ws.terminate();
+    await app.close();
+  });
+
   /** Drains one turn: transcript, end_of_turn, reply_text_delta, 2 audio chunks, reply_text, audio_end. */
   async function drainOneTurn(queue: { next: () => Promise<QueuedFrame> }): Promise<void> {
     for (let i = 0; i < 7; i++) await queue.next();

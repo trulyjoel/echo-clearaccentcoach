@@ -171,6 +171,13 @@ export function registerSessionRoutes(app: FastifyInstance): void {
       const conversationHistory: ConversationMessage[] = [];
       let turnTranscriptParts: string[] = [];
       let turnAudioChunks: Buffer[] = [];
+      /**
+       * Whether the current turn has already been flushed (by `speech_final` or `UtteranceEnd`).
+       * Deepgram can send both for the same turn — this makes the second one a true no-op,
+       * including its `send({ type: "end_of_turn" })`, not just the `handleTurn` call. Reset the
+       * instant new transcript activity arrives, marking the next turn as open again.
+       */
+      let turnFlushed = false;
 
       /**
        * Tracks the turn whose LLM/TTS pipeline is currently running, so a subsequent confirmed
@@ -397,12 +404,15 @@ export function registerSessionRoutes(app: FastifyInstance): void {
 
       /**
        * Ends the current turn and hands it to `handleTurn`, draining the buffered transcript and
-       * audio. Called from both `speech_final` and the `UtteranceEnd` fallback below; the buffer
-       * being empty (already drained) is what makes calling this from both a no-op the second
-       * time, so a `speech_final` immediately followed by `UtteranceEnd` — which Deepgram's docs
-       * say can happen — doesn't double-process the turn.
+       * audio. Called from both `speech_final` and the `UtteranceEnd` fallback below; `turnFlushed`
+       * is what makes calling this from both a true no-op the second time — including suppressing
+       * the duplicate `end_of_turn` — so a `speech_final` immediately followed by `UtteranceEnd`,
+       * which Deepgram's docs say can happen, doesn't double-process the turn or leave the client
+       * with two typing indicators (one stuck forever once the real reply lands in the other).
        */
       function flushTurn(): void {
+        if (turnFlushed) return;
+        turnFlushed = true;
         send({ type: "end_of_turn" });
         const turnTranscript = turnTranscriptParts.join(" ").trim();
         turnTranscriptParts = [];
@@ -423,6 +433,7 @@ export function registerSessionRoutes(app: FastifyInstance): void {
         if (data.type !== "Results") return;
         const transcript = data.channel.alternatives[0]?.transcript ?? "";
         if (!transcript) return;
+        turnFlushed = false;
 
         // A non-empty transcript arriving while a turn's pipeline is running, or its reply is
         // still audibly playing, is real barge-in — unlike a bare VAD "speech started" ping,
