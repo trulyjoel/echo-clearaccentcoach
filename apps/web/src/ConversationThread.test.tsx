@@ -69,4 +69,37 @@ describe("ConversationThread", () => {
 
     expect(log.scrollTop).toBe(400);
   });
+
+  describe("Callie's turn statuses", () => {
+    it("shows a typing indicator, and no text, while pending", () => {
+      const turns: Turn[] = [{ kind: "assistant", status: "pending", text: "" }];
+      render(<ConversationThread turns={turns} />);
+
+      expect(screen.getByRole("status", { name: "Callie is typing" })).toBeInTheDocument();
+    });
+
+    it("shows the accumulated text plainly while streaming", () => {
+      const turns: Turn[] = [{ kind: "assistant", status: "streaming", text: "Nice " }];
+      render(<ConversationThread turns={turns} />);
+
+      expect(screen.getByText("Nice")).toBeInTheDocument();
+      expect(screen.queryByRole("status", { name: "Callie is typing" })).not.toBeInTheDocument();
+    });
+
+    it("shows the full text plainly once final", () => {
+      const turns: Turn[] = [{ kind: "assistant", status: "final", text: "Nice job!" }];
+      render(<ConversationThread turns={turns} />);
+
+      expect(screen.getByText("Nice job!")).toBeInTheDocument();
+    });
+
+    it("keeps the streamed-so-far text, visibly marked as cut off, once interrupted", () => {
+      const turns: Turn[] = [{ kind: "assistant", status: "interrupted", text: "Nice j" }];
+      render(<ConversationThread turns={turns} />);
+
+      const bubble = screen.getByText("Nice j", { exact: false });
+      expect(bubble).toHaveTextContent("Nice j");
+      expect(bubble).toHaveTextContent("(cut off)");
+    });
+  });
 });

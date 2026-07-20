@@ -343,7 +343,7 @@ export function Session() {
           replyAudioRef.current = undefined;
           setState((prev) => {
             if (prev.status !== "active") return prev;
-            return { ...prev, turns: interruptAssistantTurn(prev.turns, message.reason) };
+            return { ...prev, turns: interruptAssistantTurn(prev.turns) };
           });
           return;
         }

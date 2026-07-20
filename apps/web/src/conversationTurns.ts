@@ -88,15 +88,14 @@ export function finalizeAssistantTurn(turns: readonly Turn[]): Turn[] {
 }
 
 /**
- * Marks Callie's in-progress turn cut short. A barge-in means the user is about to speak over
- * it, so the cut-short text is no longer relevant and is cleared; a pipeline error leaves it in
- * place since whatever generated so far is still valid.
+ * Marks Callie's in-progress turn cut short by barge-in or a pipeline error, keeping whatever
+ * text had streamed so far (rather than discarding it) so the conversation history still reads
+ * coherently.
  */
-export function interruptAssistantTurn(turns: readonly Turn[], reason: "barge_in" | "error"): Turn[] {
+export function interruptAssistantTurn(turns: readonly Turn[]): Turn[] {
   const last = lastTurn(turns);
   if (last?.kind !== "assistant" || last.status === "final") return turns.slice();
-  const text = reason === "barge_in" ? "" : last.text;
-  return [...turns.slice(0, -1), { ...last, status: "interrupted", text }];
+  return [...turns.slice(0, -1), { ...last, status: "interrupted" }];
 }
 
 /**

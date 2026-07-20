@@ -1,5 +1,29 @@
 import { useEffect, useRef } from "react";
-import { type Turn, userTurnText } from "./conversationTurns.js";
+import type { AssistantTurn, Turn } from "./conversationTurns.js";
+import { userTurnText } from "./conversationTurns.js";
+
+/** Three bouncing dots shown in Callie's bubble position while her reply is still being generated. */
+function TypingIndicator() {
+  return (
+    <span role="status" aria-label="Callie is typing" className="flex items-center gap-1 px-1 py-1">
+      <span className="h-2 w-2 animate-bounce rounded-full bg-lavender-400 [animation-delay:-0.3s]" />
+      <span className="h-2 w-2 animate-bounce rounded-full bg-lavender-400 [animation-delay:-0.15s]" />
+      <span className="h-2 w-2 animate-bounce rounded-full bg-lavender-400" />
+    </span>
+  );
+}
+
+function AssistantBubbleContent({ turn }: { turn: AssistantTurn }) {
+  if (turn.status === "pending") return <TypingIndicator />;
+  return (
+    <>
+      {turn.text}
+      {turn.status === "interrupted" && (
+        <span className="ml-1 text-xs italic text-lavender-500">(cut off)</span>
+      )}
+    </>
+  );
+}
 
 function TurnBubble({ turn }: { turn: Turn }) {
   if (turn.kind === "user") {
@@ -15,7 +39,7 @@ function TurnBubble({ turn }: { turn: Turn }) {
   return (
     <div className="flex justify-start">
       <p className="max-w-[75%] rounded-2xl rounded-bl-sm bg-lavender-100 px-4 py-2 text-lavender-900">
-        {turn.text}
+        <AssistantBubbleContent turn={turn} />
       </p>
     </div>
   );

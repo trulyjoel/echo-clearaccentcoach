@@ -144,24 +144,18 @@ describe("finalizeAssistantTurn", () => {
 });
 
 describe("interruptAssistantTurn", () => {
-  it("clears the text on barge-in", () => {
-    const turns = interruptAssistantTurn(
-      [{ kind: "assistant", status: "streaming", text: "Nice job" }],
-      "barge_in",
-    );
-    expect(turns).toEqual([{ kind: "assistant", status: "interrupted", text: "" }]);
-  });
-
-  it("keeps the text on a pipeline error", () => {
-    const turns = interruptAssistantTurn(
-      [{ kind: "assistant", status: "streaming", text: "Oh no" }],
-      "error",
-    );
-    expect(turns).toEqual([{ kind: "assistant", status: "interrupted", text: "Oh no" }]);
+  it("keeps whatever text had streamed so far, marked interrupted", () => {
+    const turns = interruptAssistantTurn([{ kind: "assistant", status: "streaming", text: "Nice job" }]);
+    expect(turns).toEqual([{ kind: "assistant", status: "interrupted", text: "Nice job" }]);
   });
 
   it("tolerates an interrupt signal when no reply is in progress", () => {
-    expect(interruptAssistantTurn([], "barge_in")).toEqual([]);
+    expect(interruptAssistantTurn([])).toEqual([]);
+  });
+
+  it("is a no-op once the turn is already final", () => {
+    const turns: Turn[] = [{ kind: "assistant", status: "final", text: "Nice job!" }];
+    expect(interruptAssistantTurn(turns)).toEqual(turns);
   });
 });
 

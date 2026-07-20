@@ -368,6 +368,23 @@ describe("Session", () => {
     expect(FakeMediaSource.instances).toHaveLength(1);
   });
 
+  it("shows a typing indicator the instant the user's turn ends, before any reply text arrives", async () => {
+    const { ws } = await startAndOpenSession();
+
+    ws.emitServerMessage({ type: "transcript", text: "hello there", isFinal: true });
+    ws.emitServerMessage({ type: "end_of_turn" });
+
+    await waitFor(() => {
+      expect(screen.getByRole("status", { name: "Callie is typing" })).toBeInTheDocument();
+    });
+
+    ws.emitServerMessage({ type: "reply_text_delta", text: "Hi!" });
+    await waitFor(() => {
+      expect(screen.queryByRole("status", { name: "Callie is typing" })).not.toBeInTheDocument();
+    });
+    expect(screen.getByText("Hi!")).toBeInTheDocument();
+  });
+
   it("renders reply_text_delta chunks as a live, growing caption", async () => {
     const { ws } = await startAndOpenSession();
 
@@ -420,25 +437,26 @@ describe("Session", () => {
     expect(screen.queryByText("First replySecond reply")).not.toBeInTheDocument();
   });
 
-  it("clears the caption on barge-in but keeps it for a pipeline error", async () => {
+  it("keeps a reply's streamed-so-far text, marked as cut off, on barge-in or a pipeline error", async () => {
     const { ws } = await startAndOpenSession();
 
     ws.emitServerMessage({ type: "reply_text_delta", text: "Nice job" });
-    await screen.findByText("Nice job");
+    await screen.findByText("Nice job", { exact: false });
 
     ws.emitServerMessage({ type: "reply_interrupted", reason: "barge_in" });
     await waitFor(() => {
-      expect(screen.queryByText("Nice job")).not.toBeInTheDocument();
+      expect(screen.getByText("Nice job", { exact: false })).toHaveTextContent("(cut off)");
     });
 
     ws.emitServerMessage({ type: "reply_text_delta", text: "Oh no" });
-    await screen.findByText("Oh no");
+    await screen.findByText("Oh no", { exact: false });
 
-    ws.emitServerMessage({
-      type: "reply_interrupted",
-      reason: "error",
+    ws.emitServerMessage({ type: "reply_interrupted", reason: "error" });
+    await waitFor(() => {
+      expect(screen.getByText("Oh no", { exact: false })).toHaveTextContent("(cut off)");
     });
-    expect(screen.getByText("Oh no")).toBeInTheDocument();
+    // The barge-in-cut reply from before is still visible too, not discarded.
+    expect(screen.getByText("Nice job", { exact: false })).toBeInTheDocument();
   });
 
   it("appends each chunk as it arrives, without waiting for reply_audio_end", async () => {
