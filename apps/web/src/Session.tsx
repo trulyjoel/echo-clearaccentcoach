@@ -44,10 +44,12 @@ function CorrectionsPanel({
   corrections,
   getToken,
   onBookmarkToggled,
+  highlightedErrorId,
 }: {
   corrections: TurnCorrections[];
   getToken: () => Promise<string | null>;
   onBookmarkToggled: (errorId: string, bookmarked: boolean) => void;
+  highlightedErrorId?: string | null;
 }) {
   const [playbackError, setPlaybackError] = useState<string | null>(null);
   const [bookmarkError, setBookmarkError] = useState<string | null>(null);
@@ -93,7 +95,12 @@ function CorrectionsPanel({
           correction.errors.map((error) => (
             <li
               key={error.id}
-              className="flex flex-col gap-2 rounded-md border border-lavender-200 bg-white p-3 shadow-sm"
+              id={`correction-${error.id}`}
+              className={`flex flex-col gap-2 rounded-md border bg-white p-3 shadow-sm transition-colors ${
+                error.id === highlightedErrorId
+                  ? "border-lavender-500 ring-2 ring-lavender-400"
+                  : "border-lavender-200"
+              }`}
             >
               <div className="flex items-center justify-between gap-2">
                 <span className="rounded-full bg-lavender-100 px-2 py-0.5 text-xs font-medium text-lavender-800">
@@ -251,6 +258,7 @@ export function Session() {
   const { getToken } = useAuth();
   const [state, setState] = useState<SessionState>({ status: "idle" });
   const [serverError, setServerError] = useState<string | null>(null);
+  const [highlightedErrorId, setHighlightedErrorId] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | undefined>(undefined);
   const recorderRef = useRef<MediaRecorder | undefined>(undefined);
   const streamRef = useRef<MediaStream | undefined>(undefined);
@@ -436,6 +444,18 @@ export function Session() {
     });
   }, []);
 
+  const handleFlaggedSpanClick = useCallback((errorId: string) => {
+    document.getElementById(`correction-${errorId}`)?.scrollIntoView({ block: "center" });
+    setHighlightedErrorId(errorId);
+  }, []);
+
+  // Briefly highlights the corrections panel entry a clicked inline span scrolled to, then clears.
+  useEffect(() => {
+    if (!highlightedErrorId) return;
+    const timer = setTimeout(() => setHighlightedErrorId(null), 1500);
+    return () => clearTimeout(timer);
+  }, [highlightedErrorId]);
+
   useEffect(() => {
     return () => {
       cleanupMedia();
@@ -480,22 +500,24 @@ export function Session() {
               {serverError}
             </p>
           )}
-          <ConversationThread turns={state.turns} />
+          <ConversationThread turns={state.turns} onFlaggedSpanClick={handleFlaggedSpanClick} />
           <CorrectionsPanel
             corrections={deriveCorrections(state.turns)}
             getToken={getToken}
             onBookmarkToggled={handleBookmarkToggled}
+            highlightedErrorId={highlightedErrorId}
           />
         </>
       )}
       {state.status === "ended" && (
         <>
           <p className="text-lavender-700">Session ended.</p>
-          <ConversationThread turns={state.turns} />
+          <ConversationThread turns={state.turns} onFlaggedSpanClick={handleFlaggedSpanClick} />
           <CorrectionsPanel
             corrections={deriveCorrections(state.turns)}
             getToken={getToken}
             onBookmarkToggled={handleBookmarkToggled}
+            highlightedErrorId={highlightedErrorId}
           />
           <button
             className="self-start rounded-md bg-lavender-600 px-4 py-2 font-medium text-white hover:bg-lavender-700"

@@ -1,5 +1,5 @@
 import type { ServerToClientMessage } from "@callie/types";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Session } from "./Session.js";
@@ -584,6 +584,40 @@ describe("Session", () => {
     expect(screen.getByText("she goes")).toBeInTheDocument();
     expect(screen.getByText("Third-person singular verbs take an -s ending.")).toBeInTheDocument();
     expect(screen.getByText("Subject-verb agreement")).toBeInTheDocument();
+  });
+
+  it("scrolls to and highlights the corrections panel entry when its flagged span is clicked", async () => {
+    const scrollIntoView = vi
+      .spyOn(HTMLElement.prototype, "scrollIntoView")
+      .mockImplementation(() => {});
+    const { ws } = await startAndOpenSession();
+
+    emitUserTurn(ws, "she go");
+    ws.emitServerMessage({
+      type: "turn_errors",
+      turnId: "turn-1",
+      createdAt: "2026-07-18T12:00:00.000Z",
+      errors: [
+        {
+          id: "error-1",
+          hasClip: false,
+          bookmarked: false,
+          category: "subject_verb_agreement",
+          original: "she go",
+          corrected: "she goes",
+          explanation: "Third-person singular verbs take an -s ending.",
+        },
+      ],
+    });
+    const log = await screen.findByRole("log", { name: "Conversation" });
+    const flaggedSpan = await waitFor(() => within(log).getByText("she go"));
+
+    await userEvent.setup().click(flaggedSpan);
+
+    expect(scrollIntoView).toHaveBeenCalled();
+    const panelEntry = document.getElementById("correction-error-1");
+    expect(panelEntry).toHaveClass("ring-lavender-400");
+    scrollIntoView.mockRestore();
   });
 
   it("does not add a panel entry for a turn with no detected errors", async () => {

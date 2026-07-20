@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
-import type { AssistantTurn, Turn } from "./conversationTurns.js";
+import type { AssistantTurn, Turn, UserTurn } from "./conversationTurns.js";
 import { userTurnText } from "./conversationTurns.js";
+import { matchFlaggedSpans, splitIntoSegments } from "./inlineErrorMatch.js";
 
 /** Three bouncing dots shown in Callie's bubble position while her reply is still being generated. */
 function TypingIndicator() {
@@ -25,12 +26,53 @@ function AssistantBubbleContent({ turn }: { turn: AssistantTurn }) {
   );
 }
 
-function TurnBubble({ turn }: { turn: Turn }) {
+/**
+ * Renders a user turn's text with a wavy underline on any span whose flagged error text was
+ * found verbatim — in addition to (not instead of) that error's entry in the corrections panel.
+ */
+function UserBubbleContent({
+  turn,
+  onFlaggedSpanClick,
+}: {
+  turn: UserTurn;
+  onFlaggedSpanClick?: ((errorId: string) => void) | undefined;
+}) {
+  const text = userTurnText(turn);
+  const matches = matchFlaggedSpans(text, turn.errors ?? []);
+  if (matches.length === 0) return <>{text}</>;
+
+  return (
+    <>
+      {splitIntoSegments(text, matches).map((segment, index) =>
+        segment.error ? (
+          <span
+            key={index}
+            className="cursor-pointer underline decoration-wavy decoration-2 decoration-red-400 underline-offset-4"
+            title={`${segment.error.corrected} — ${segment.error.explanation}`}
+            onClick={() => onFlaggedSpanClick?.(segment.error!.id)}
+          >
+            {segment.text}
+          </span>
+        ) : (
+          <span key={index}>{segment.text}</span>
+        ),
+      )}
+    </>
+  );
+}
+
+function TurnBubble({
+  turn,
+  onFlaggedSpanClick,
+}: {
+  turn: Turn;
+  onFlaggedSpanClick?: ((errorId: string) => void) | undefined;
+}) {
   if (turn.kind === "user") {
     return (
       <div className="flex justify-end">
         <p className="max-w-[75%] rounded-2xl rounded-br-sm bg-violet-600 px-4 py-2 text-white">
-          {userTurnText(turn)}
+          <UserBubbleContent turn={turn} onFlaggedSpanClick={onFlaggedSpanClick} />
         </p>
       </div>
     );
@@ -46,7 +88,13 @@ function TurnBubble({ turn }: { turn: Turn }) {
 }
 
 /** Renders the full session history as a scrolling thread of speech bubbles. */
-export function ConversationThread({ turns }: { turns: readonly Turn[] }) {
+export function ConversationThread({
+  turns,
+  onFlaggedSpanClick,
+}: {
+  turns: readonly Turn[];
+  onFlaggedSpanClick?: ((errorId: string) => void) | undefined;
+}) {
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -64,7 +112,7 @@ export function ConversationThread({ turns }: { turns: readonly Turn[] }) {
     >
       {/* Index is a stable key here: turns only ever append, never reorder or get removed. */}
       {turns.map((turn, index) => (
-        <TurnBubble key={index} turn={turn} />
+        <TurnBubble key={index} turn={turn} onFlaggedSpanClick={onFlaggedSpanClick} />
       ))}
     </div>
   );

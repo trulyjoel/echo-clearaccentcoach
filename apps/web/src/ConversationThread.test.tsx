@@ -1,7 +1,22 @@
+import type { PersistedError } from "@callie/types";
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import userEvent from "@testing-library/user-event";
+import { describe, expect, it, vi } from "vitest";
 import { ConversationThread } from "./ConversationThread.js";
-import type { Turn } from "./conversationTurns.js";
+import type { Turn, UserTurn } from "./conversationTurns.js";
+
+function makeError(overrides: Partial<PersistedError> = {}): PersistedError {
+  return {
+    id: "error-1",
+    hasClip: false,
+    bookmarked: false,
+    category: "word_order",
+    original: "go I",
+    corrected: "I go",
+    explanation: "Subject comes before the verb.",
+    ...overrides,
+  };
+}
 
 describe("ConversationThread", () => {
   it("renders every turn's text in order", () => {
@@ -100,6 +115,58 @@ describe("ConversationThread", () => {
       const bubble = screen.getByText("Nice j", { exact: false });
       expect(bubble).toHaveTextContent("Nice j");
       expect(bubble).toHaveTextContent("(cut off)");
+    });
+  });
+
+  describe("inline flagged-error indicator", () => {
+    function userTurnWithError(error: PersistedError): UserTurn {
+      return {
+        kind: "user",
+        status: "final",
+        finalizedText: "yesterday go I to the store",
+        interimText: "",
+        errors: [error],
+        errorsCreatedAt: "2026-07-18T12:00:00.000Z",
+      };
+    }
+
+    it("underlines a flagged span found verbatim in the turn's text", () => {
+      const error = makeError({ original: "go I" });
+      render(<ConversationThread turns={[userTurnWithError(error)]} />);
+
+      const span = screen.getByText("go I");
+      expect(span).toHaveClass("decoration-wavy");
+    });
+
+    it("does not underline anything when the flagged text isn't found verbatim", () => {
+      const error = makeError({ original: "not in the text" });
+      render(<ConversationThread turns={[userTurnWithError(error)]} />);
+
+      expect(screen.queryByText("not in the text")).not.toBeInTheDocument();
+      expect(screen.getByText("yesterday go I to the store")).toBeInTheDocument();
+    });
+
+    it("surfaces the correction and explanation via the span's title on hover", () => {
+      const error = makeError({ original: "go I", corrected: "I go", explanation: "Word order." });
+      render(<ConversationThread turns={[userTurnWithError(error)]} />);
+
+      expect(screen.getByText("go I")).toHaveAttribute("title", "I go — Word order.");
+    });
+
+    it("calls onFlaggedSpanClick with the error's id when the span is clicked", async () => {
+      const error = makeError({ original: "go I", id: "error-42" });
+      const onFlaggedSpanClick = vi.fn();
+      const user = userEvent.setup();
+      render(
+        <ConversationThread
+          turns={[userTurnWithError(error)]}
+          onFlaggedSpanClick={onFlaggedSpanClick}
+        />,
+      );
+
+      await user.click(screen.getByText("go I"));
+
+      expect(onFlaggedSpanClick).toHaveBeenCalledWith("error-42");
     });
   });
 });
