@@ -35,17 +35,8 @@ async function requireAuthenticatedUser(
   request: FastifyRequest,
   reply: FastifyReply,
 ): Promise<void> {
-  bridgeQueryToken(request);
   if (!getAuthenticatedUserId(request)) {
     await reply.code(401).send({ error: "Not authenticated" });
-  }
-}
-
-/** Browsers can't set custom headers on a WebSocket handshake, so the client passes the Clerk token as a query param. */
-function bridgeQueryToken(request: FastifyRequest): void {
-  const { token } = request.query as { token?: string };
-  if (token && !request.headers.authorization) {
-    request.headers.authorization = `Bearer ${token}`;
   }
 }
 

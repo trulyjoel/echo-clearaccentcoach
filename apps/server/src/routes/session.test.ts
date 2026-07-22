@@ -1,6 +1,6 @@
 import type { DetectedError, L1, ServerToClientMessage } from "@callie/types";
 import { eq } from "drizzle-orm";
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { db } from "../db/client.js";
 import { audioClips, profiles, sessions, turnErrors, turns, usageRecords } from "../db/schema.js";
@@ -9,14 +9,32 @@ import type { ConversationMessage } from "../llm.js";
 
 type InjectedWebSocket = Awaited<ReturnType<FastifyInstance["injectWS"]>>;
 
+type FakeAuthRequest = FastifyRequest & {
+  auth?: { isAuthenticated: boolean; userId: string | null };
+};
+
 vi.mock("@clerk/fastify", () => ({
-  clerkPlugin: async () => {},
-  getAuth: (request: { headers: { authorization?: string } }) => {
-    if (request.headers.authorization === "Bearer test-user-session-456") {
-      return { isAuthenticated: true, userId: "test-user-session-456" };
-    }
-    return { isAuthenticated: false, userId: null };
-  },
+  // The real clerkPlugin computes auth once, in an `onRequest` hook, from whatever headers are
+  // present *at that point* in the request lifecycle, and getAuth just reads the cached result —
+  // it does not re-read headers on every call. Mocked this way (rather than a getAuth that
+  // freshly reads request.headers.authorization on every call) so tests can catch bugs where a
+  // header is set too late, e.g. by a preValidation hook running after onRequest already fired.
+  clerkPlugin: Object.assign(
+    async (instance: FastifyInstance) => {
+      instance.decorateRequest("auth", null);
+      instance.addHook("onRequest", async (request: FakeAuthRequest) => {
+        request.auth =
+          request.headers.authorization === "Bearer test-user-session-456"
+            ? { isAuthenticated: true, userId: "test-user-session-456" }
+            : { isAuthenticated: false, userId: null };
+      });
+    },
+    // Marks this as a "fastify-plugin" so its onRequest hook attaches to the same encapsulation
+    // as the caller (matching the real @clerk/fastify, which uses the `fastify-plugin` package)
+    // instead of being scoped to a hidden child context invisible to sibling routes.
+    { [Symbol.for("skip-override")]: true },
+  ),
+  getAuth: (request: FakeAuthRequest) => request.auth,
 }));
 
 const deepgramTestState = vi.hoisted(() => {

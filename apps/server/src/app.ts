@@ -2,6 +2,7 @@ import cors from "@fastify/cors";
 import websocket from "@fastify/websocket";
 import { clerkPlugin } from "@clerk/fastify";
 import Fastify, { type FastifyInstance } from "fastify";
+import { bridgeQueryToken } from "./auth.js";
 import { registerAuthRoutes } from "./routes/auth.js";
 import { registerErrorRoutes } from "./routes/errors.js";
 import { registerHistoryRoutes } from "./routes/history.js";
@@ -17,8 +18,9 @@ export function buildApp(): FastifyInstance {
   app.get("/health", async () => ({ status: "ok" }));
 
   app.register(async (apiApp) => {
-    // onRequest so this runs before any route's own auth hook, including preValidation hooks
-    // like the session route's (preValidation fires before Fastify's default preHandler hook).
+    // Must run before clerkPlugin's own onRequest hook, which computes and caches Clerk's auth
+    // result from whatever headers are present at that point (see bridgeQueryToken's docstring).
+    apiApp.addHook("onRequest", bridgeQueryToken);
     apiApp.register(clerkPlugin, { hookName: "onRequest" });
     registerAuthRoutes(apiApp);
     registerOnboardingRoutes(apiApp);
