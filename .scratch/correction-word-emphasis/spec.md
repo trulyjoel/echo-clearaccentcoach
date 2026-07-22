@@ -1,5 +1,7 @@
 # Audio emphasis for missed short words in corrections
 
+Status: ready-for-agent
+
 ## Problem
 
 When a learner drops a short function word (e.g. "I want to speak well for meeting" instead of
