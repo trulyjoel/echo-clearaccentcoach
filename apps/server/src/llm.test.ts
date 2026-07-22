@@ -28,7 +28,8 @@ vi.mock("ai", () => ({
   }),
 }));
 
-const { buildAnalysisSystemPrompt, getLLMProvider } = await import("./llm.js");
+const { buildAnalysisSystemPrompt, buildReplySystemPrompt, getLLMProvider } =
+  await import("./llm.js");
 
 describe("buildAnalysisSystemPrompt", () => {
   it("includes the generic taxonomy for an unsupported/other L1", () => {
@@ -58,6 +59,29 @@ describe("buildAnalysisSystemPrompt", () => {
   it("produces a different prompt per supported L1", () => {
     const prompts = SUPPORTED_L1S.map((l1) => buildAnalysisSystemPrompt(l1));
     expect(new Set(prompts).size).toBe(SUPPORTED_L1S.length);
+  });
+});
+
+describe("buildReplySystemPrompt", () => {
+  it("includes the no-error few-shot example when there are no detected errors", () => {
+    const prompt = buildReplySystemPrompt([]);
+
+    expect(prompt).toContain("just talk normally and I'll jump in when something's off");
+  });
+
+  it("includes the error-present few-shot examples when errors are detected", () => {
+    const prompt = buildReplySystemPrompt([
+      {
+        category: "article_usage",
+        original: "I saw movie last night.",
+        corrected: "I saw a movie last night.",
+        explanation: "Singular countable nouns need an article.",
+      },
+    ]);
+
+    expect(prompt).toContain("Small thing — 'I saw a movie.'");
+    expect(prompt).toContain("you'd say 'I've been living here for three years' though");
+    expect(prompt).not.toContain("just talk normally and I'll jump in when something's off");
   });
 });
 
