@@ -1,4 +1,4 @@
-import type { AuthMeResponse } from "@callie/types";
+import type { AuthMeResponse } from "@kalli/types";
 import type { FastifyInstance } from "fastify";
 import { requireUserId } from "../auth.js";
 

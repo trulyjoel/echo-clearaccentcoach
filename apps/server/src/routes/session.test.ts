@@ -1,4 +1,4 @@
-import type { DetectedError, L1, ServerToClientMessage } from "@callie/types";
+import type { DetectedError, L1, ServerToClientMessage } from "@kalli/types";
 import { eq } from "drizzle-orm";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -569,11 +569,11 @@ describe("turn-based reply loop", () => {
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
 
-    emitSpeechFinal("hello Callie");
+    emitSpeechFinal("hello Kalli");
 
     expect(await queue.next()).toEqual({
       kind: "json",
-      message: { type: "transcript", text: "hello Callie", isFinal: true },
+      message: { type: "transcript", text: "hello Kalli", isFinal: true },
     });
     expect(await queue.next()).toEqual({ kind: "json", message: { type: "end_of_turn" } });
     expect(await queue.next()).toEqual({
@@ -609,7 +609,7 @@ describe("turn-based reply loop", () => {
     };
     const sessionId = started.message.sessionId;
 
-    emitSpeechFinal("hello Callie");
+    emitSpeechFinal("hello Kalli");
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
     await queue.next(); // reply_text_delta
@@ -623,7 +623,7 @@ describe("turn-based reply loop", () => {
 
     const rows = await db.select().from(turns).where(eq(turns.sessionId, sessionId));
     expect(rows).toHaveLength(1);
-    expect(rows[0]?.transcript).toBe("hello Callie");
+    expect(rows[0]?.transcript).toBe("hello Kalli");
     expect(rows[0]?.reply).toBe("Nice job!");
 
     // Drain the rest of the pipeline (reply_audio_end) so no fire-and-forget work from this
@@ -655,14 +655,14 @@ describe("turn-based reply loop", () => {
       type: "Results",
       is_final: true,
       speech_final: true,
-      channel: { alternatives: [{ transcript: "Callie" }] },
+      channel: { alternatives: [{ transcript: "Kalli" }] },
     });
 
     await queue.next(); // transcript "hello"
-    await queue.next(); // transcript "Callie"
+    await queue.next(); // transcript "Kalli"
     await queue.next(); // end_of_turn
 
-    expect(llmTestState.getCalls()).toEqual([[{ role: "user", content: "hello Callie" }]]);
+    expect(llmTestState.getCalls()).toEqual([[{ role: "user", content: "hello Kalli" }]]);
 
     // Drain the rest of the pipeline before tearing down, per the note above.
     await queue.next(); // reply_text_delta
@@ -719,14 +719,14 @@ describe("turn-based reply loop", () => {
       type: "Results",
       is_final: true,
       speech_final: false,
-      channel: { alternatives: [{ transcript: "hello Callie" }] },
+      channel: { alternatives: [{ transcript: "hello Kalli" }] },
     });
     await queue.next(); // transcript
 
     deepgramTestState.getLatest()?.emitMessage({ type: "UtteranceEnd" });
 
     expect(await queue.next()).toEqual({ kind: "json", message: { type: "end_of_turn" } });
-    expect(llmTestState.getCalls()).toEqual([[{ role: "user", content: "hello Callie" }]]);
+    expect(llmTestState.getCalls()).toEqual([[{ role: "user", content: "hello Kalli" }]]);
 
     // Drain the rest of the pipeline before tearing down, per the note above.
     await queue.next(); // reply_text_delta
@@ -750,7 +750,7 @@ describe("turn-based reply loop", () => {
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
 
-    emitSpeechFinal("hello Callie");
+    emitSpeechFinal("hello Kalli");
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
 
@@ -782,7 +782,7 @@ describe("turn-based reply loop", () => {
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
 
-    emitSpeechFinal("hello Callie");
+    emitSpeechFinal("hello Kalli");
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
 
@@ -859,7 +859,7 @@ describe("turn-based reply loop", () => {
     };
     const sessionId = started.message.sessionId;
 
-    emitSpeechFinal("hello Callie");
+    emitSpeechFinal("hello Kalli");
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
     expect(await queue.next()).toEqual({
@@ -893,7 +893,7 @@ describe("turn-based reply loop", () => {
     };
     const sessionId = started.message.sessionId;
 
-    emitSpeechFinal("hello Callie");
+    emitSpeechFinal("hello Kalli");
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
     await queue.next(); // reply_text_delta
@@ -1017,7 +1017,7 @@ describe("two-pass correction pipeline", () => {
     };
     const sessionId = started.message.sessionId;
 
-    emitSpeechFinal("hello Callie");
+    emitSpeechFinal("hello Kalli");
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
     await queue.next(); // reply_text_delta
@@ -1055,7 +1055,7 @@ describe("two-pass correction pipeline", () => {
     };
     const sessionId = started.message.sessionId;
 
-    emitSpeechFinal("hello Callie");
+    emitSpeechFinal("hello Kalli");
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
     expect(await queue.next()).toEqual({
@@ -1140,7 +1140,7 @@ describe("correction text panel", () => {
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
 
-    emitSpeechFinal("hello Callie");
+    emitSpeechFinal("hello Kalli");
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
     await queue.next(); // reply_text_delta
@@ -1297,7 +1297,7 @@ describe("usage metering", () => {
     };
     const sessionId = started.message.sessionId;
 
-    emitSpeechFinal("hello Callie");
+    emitSpeechFinal("hello Kalli");
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
     await queue.next(); // reply_text_delta
@@ -1338,7 +1338,7 @@ describe("usage metering", () => {
     const sessionId = started.message.sessionId;
 
     for (let i = 0; i < 2; i++) {
-      emitSpeechFinal("hello Callie");
+      emitSpeechFinal("hello Kalli");
       for (let j = 0; j < 6; j++) await queue.next();
     }
 
@@ -1452,7 +1452,7 @@ describe("audio clip capture + storage", () => {
     ws.send(Buffer.from([1, 2, 3]));
     await new Promise((resolve) => setTimeout(resolve, 20));
 
-    emitSpeechFinal("hello Callie");
+    emitSpeechFinal("hello Kalli");
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
     await queue.next(); // reply_text_delta
@@ -1566,7 +1566,7 @@ describe("barge-in support", () => {
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
 
-    emitSpeechFinal("hello Callie");
+    emitSpeechFinal("hello Kalli");
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
     await queue.next(); // reply_text_delta
@@ -1615,7 +1615,7 @@ describe("barge-in support", () => {
     };
     const sessionId = started.message.sessionId;
 
-    emitSpeechFinal("hello Callie");
+    emitSpeechFinal("hello Kalli");
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
     await queue.next(); // reply_text_delta
@@ -1630,7 +1630,7 @@ describe("barge-in support", () => {
 
     const rows = await db.select().from(turns).where(eq(turns.sessionId, sessionId));
     expect(rows).toHaveLength(1);
-    expect(rows[0]?.transcript).toBe("hello Callie");
+    expect(rows[0]?.transcript).toBe("hello Kalli");
     expect(rows[0]?.reply).toBe("Nice job!");
 
     ws.terminate();
@@ -1741,7 +1741,7 @@ describe("barge-in support", () => {
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
 
-    emitSpeechFinal("hello Callie");
+    emitSpeechFinal("hello Kalli");
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
     await queue.next(); // reply_text_delta
@@ -1772,7 +1772,7 @@ describe("barge-in support", () => {
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
 
-    emitSpeechFinal("hello Callie");
+    emitSpeechFinal("hello Kalli");
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
     await queue.next(); // reply_text_delta

@@ -1,4 +1,4 @@
-import type { AuthMeResponse } from "@callie/types";
+import type { AuthMeResponse } from "@kalli/types";
 import { useAuth, UserButton } from "@clerk/react";
 import { useEffect, useState } from "react";
 import { History } from "./History.js";
@@ -46,7 +46,7 @@ export function Home() {
 
   return (
     <main>
-      <h1>Callie</h1>
+      <h1>Kalli</h1>
       <UserButton />
       {me.status === "loading" && <p>Loading...</p>}
       {me.status === "error" && <p>Couldn't load your account.</p>}

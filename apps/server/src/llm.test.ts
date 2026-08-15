@@ -1,4 +1,4 @@
-import { SUPPORTED_L1S } from "@callie/types";
+import { SUPPORTED_L1S } from "@kalli/types";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const anthropicTestState = vi.hoisted(() => ({

@@ -35,7 +35,7 @@ client-sent `{type:"end_session"}` (`user_ended`), socket disconnect (`disconnec
 errored Deepgram connection (`error`).
 
 Message contract (`ServerToClientMessage`/`ClientToServerMessage`/`SessionEndReason`) lives in
-`@callie/types` per the spec's "typed and shared WS contract" requirement, ready for ticket 05 to
+`@kalli/types` per the spec's "typed and shared WS contract" requirement, ready for ticket 05 to
 extend.
 
 Frontend: new `apps/web/src/Session.tsx`, rendered from `Home.tsx`. Handles mic capture

@@ -1,5 +1,5 @@
 {
-  "name": "callie",
+  "name": "kalli",
   "private": true,
   "type": "module",
   "engines": {
@@ -7,8 +7,8 @@
   },
   "scripts": {
     "dev": "pnpm -r --parallel --filter \"./apps/*\" dev",
-    "dev:server": "pnpm --filter @callie/server dev",
-    "dev:web": "pnpm --filter @callie/web dev",
+    "dev:server": "pnpm --filter @kalli/server dev",
+    "dev:web": "pnpm --filter @kalli/web dev",
     "build": "pnpm -r build",
     "lint": "oxlint apps packages",
     "format": "oxfmt apps packages",

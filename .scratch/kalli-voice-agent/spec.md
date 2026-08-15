@@ -1,4 +1,4 @@
-# Callie: Conversational Voice Agent for L2 English Coaching
+# Kalli: Conversational Voice Agent for L2 English Coaching
 
 Status: ready-for-agent
 
@@ -8,21 +8,21 @@ L2 (second-language) English speakers who want to improve their spoken English h
 
 ## Solution
 
-Callie is a browser-based conversational voice agent. The user talks to Callie through their microphone; she carries on a natural, turn-based conversation while detecting grammar and word-order errors in what the user says. Corrections are delivered two ways every turn: briefly and naturally woven into Callie's spoken reply, and as a fuller structured breakdown in an on-screen text panel. Because certain error patterns are characteristic of a learner's native language (L1), Callie asks for the user's L1 at onboarding and uses it to bias detection toward patterns common for that language family. Sessions are turn-based (Callie waits for the user to finish speaking before responding) but support barge-in (the user can interrupt Callie mid-reply). Error history persists per user across sessions so progress can be tracked over time. Pronunciation scoring (as opposed to grammar/word-order) is explicitly deferred — see Out of Scope.
+Kalli is a browser-based conversational voice agent. The user talks to Kalli through their microphone; she carries on a natural, turn-based conversation while detecting grammar and word-order errors in what the user says. Corrections are delivered two ways every turn: briefly and naturally woven into Kalli's spoken reply, and as a fuller structured breakdown in an on-screen text panel. Because certain error patterns are characteristic of a learner's native language (L1), Kalli asks for the user's L1 at onboarding and uses it to bias detection toward patterns common for that language family. Sessions are turn-based (Kalli waits for the user to finish speaking before responding) but support barge-in (the user can interrupt Kalli mid-reply). Error history persists per user across sessions so progress can be tracked over time. Pronunciation scoring (as opposed to grammar/word-order) is explicitly deferred — see Out of Scope.
 
 ## User Stories
 
 1. As a new user, I want to create an account, so that my conversation history and progress persist across sessions.
 2. As a new user, I want to log in on any device, so that I can practice from wherever I am.
-3. As a new user, I want to select my native language (L1) during onboarding, so that Callie can watch for error patterns common to speakers of my language.
+3. As a new user, I want to select my native language (L1) during onboarding, so that Kalli can watch for error patterns common to speakers of my language.
 4. As a new user whose L1 isn't in the supported shortlist, I want to select "Other," so that I can still use the product with generic error detection.
 5. As a new user, I want to be asked for explicit consent before any of my voice is recorded and stored, so that I understand and control how my voice data is used.
 6. As a user, I want to start a conversation session with a single action, so that I can begin practicing without friction.
-7. As a user, I want Callie to listen through my microphone and respond by voice, so that the interaction feels like a real conversation, not a chat app.
-8. As a user, I want Callie to wait until I've finished speaking before she responds, so that she doesn't talk over me.
-9. As a user, I want to be able to interrupt Callie while she's speaking, so that the conversation feels natural rather than rigid.
-10. As a user, I want Callie to notice when I make a grammar or word-order mistake, so that I can learn from it in the moment.
-11. As a user, I want Callie to briefly correct my mistake out loud as part of her natural reply, so that I get feedback without the conversation grinding to a halt.
+7. As a user, I want Kalli to listen through my microphone and respond by voice, so that the interaction feels like a real conversation, not a chat app.
+8. As a user, I want Kalli to wait until I've finished speaking before she responds, so that she doesn't talk over me.
+9. As a user, I want to be able to interrupt Kalli while she's speaking, so that the conversation feels natural rather than rigid.
+10. As a user, I want Kalli to notice when I make a grammar or word-order mistake, so that I can learn from it in the moment.
+11. As a user, I want Kalli to briefly correct my mistake out loud as part of her natural reply, so that I get feedback without the conversation grinding to a halt.
 12. As a user, I want to see a fuller written breakdown of each correction (what I said, what's correct, why) in a side panel, so that I can review it without interrupting the flow of talking.
 13. As a user whose L1 is one of the supported languages, I want corrections to reflect patterns common for speakers of my language, so that feedback feels relevant rather than generic.
 14. As a user, I want to hear a short clip of my own voice for a flagged error, so that I can hear exactly how I said it.
@@ -32,7 +32,7 @@ Callie is a browser-based conversational voice agent. The user talks to Callie t
 18. As a user, I want my recorded error clips to eventually expire, so that my voice data isn't retained indefinitely without my ongoing awareness.
 19. As a user, I want the option to bookmark a specific error clip, so that it's kept past the normal expiry window for my own reference.
 20. As a user, I want the conversation to be freeform (not locked to a fixed lesson script), so that I can talk about whatever I want to practice.
-21. As a user, I want Callie to keep the conversation moving with relevant follow-up if I stall, so that I get more speaking practice per session.
+21. As a user, I want Kalli to keep the conversation moving with relevant follow-up if I stall, so that I get more speaking practice per session.
 22. As a returning user, I want to resume practicing without re-entering my L1 or consent every time, so that returning sessions start quickly.
 23. As a product owner, I want per-user, per-session usage (duration, turns, vendor API cost) recorded, so that future usage-based billing/limits can be built without backfilling data.
 24. As a product owner, I want a hard cap on concurrent/daily sessions per user, so that a single user or bug can't generate runaway vendor costs.
@@ -48,7 +48,7 @@ Callie is a browser-based conversational voice agent. The user talks to Callie t
 
 **Frontend**
 - Vite + React, deployed on Vercel.
-- Captures mic audio, streams it to the backend over WebSocket, plays back streamed TTS audio, renders the live transcript and the correction text panel, supports sending a "barge-in" signal when the user starts speaking while Callie's audio is playing.
+- Captures mic audio, streams it to the backend over WebSocket, plays back streamed TTS audio, renders the live transcript and the correction text panel, supports sending a "barge-in" signal when the user starts speaking while Kalli's audio is playing.
 
 **Backend**
 - Fastify + `@fastify/websocket`, deployed on Fly.io (chosen over serverless hosts because the WebSocket connections are long-lived).
@@ -57,17 +57,17 @@ Callie is a browser-based conversational voice agent. The user talks to Callie t
 
 **Audio transport**
 - Plain WebSocket carrying audio frames (not WebRTC) between browser and backend, since this is a direct client-to-own-server topology, not peer-to-peer or multi-party.
-- Mic stays open for the duration of the session (including while Callie's TTS is playing) so the backend can detect barge-in.
+- Mic stays open for the duration of the session (including while Kalli's TTS is playing) so the backend can detect barge-in.
 
 **STT**
 - Deepgram streaming API (Nova-tier monolingual model), used for both live transcription and end-of-turn (endpointing) detection that triggers the correction pipeline.
 
 **TTS**
-- ElevenLabs streaming API, using an existing preset voice for Callie (no custom voice design/cloning in this scope).
+- ElevenLabs streaming API, using an existing preset voice for Kalli (no custom voice design/cloning in this scope).
 
 **Correction pipeline (two-pass, per user turn)**
 - Pass 1 (analysis): given the turn's transcript, produce a structured error list — each error tagged with a category (word order, verb tense/aspect, subject-verb agreement, article usage, preposition choice), the original text, the corrected text, and a brief explanation. The prompt is seeded with the user's L1 to bias detection toward known interference patterns for that language family (hardcoded hint sets for the top 4-5 most common L1s; "Other"/unsupported L1s fall back to the generic category list with no L1-specific hints).
-- Pass 2 (reply generation): given the transcript, the pass-1 error list, and recent conversation history, produce Callie's natural conversational reply, briefly acknowledging/correcting the most relevant error without derailing the conversation.
+- Pass 2 (reply generation): given the transcript, the pass-1 error list, and recent conversation history, produce Kalli's natural conversational reply, briefly acknowledging/correcting the most relevant error without derailing the conversation.
 - Both passes run through a shared LLM-provider abstraction (Vercel AI SDK), configured for Claude Sonnet, so the underlying model can be swapped via configuration rather than a code change.
 - Pronunciation is explicitly out of scope for the analysis pass in this spec — see Out of Scope.
 
@@ -116,7 +116,7 @@ Callie is a browser-based conversational voice agent. The user talks to Callie t
 - Multiple selectable target accents (e.g., British RP, Australian). MVP supports a single fixed target (General American).
 - Structured lesson plans/curriculum content system. MVP is freeform conversation only.
 - Native mobile app or telephony (phone call) client. MVP is browser-only.
-- Custom voice design or voice cloning for Callie. MVP uses an existing ElevenLabs preset voice.
+- Custom voice design or voice cloning for Kalli. MVP uses an existing ElevenLabs preset voice.
 - L1 interference-pattern hints beyond the top 4-5 most common native languages. Other L1s fall back to generic (non-L1-biased) error detection.
 - Active billing/paywall enforcement. Usage is metered and recorded from day one, but no payment collection or hard usage-based blocking is built in this scope.
 - Fly.io-colocated Postgres. Neon was chosen for its free tier; revisit only if query latency is measured as a real bottleneck.

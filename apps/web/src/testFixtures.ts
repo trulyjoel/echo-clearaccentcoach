@@ -1,4 +1,4 @@
-import type { PersistedError } from "@callie/types";
+import type { PersistedError } from "@kalli/types";
 
 /** A minimal, override-able `PersistedError` for tests that don't care about most of its fields. */
 export function makeError(overrides: Partial<PersistedError> = {}): PersistedError {

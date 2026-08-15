@@ -14,7 +14,7 @@ client can play audio chunks as they arrive (ticket 16) rather than buffering th
 - [x] `generateReply` uses `streamText` (Vercel AI SDK) instead of `generateText`, exposing deltas
       and final usage (`apps/server/src/llm.ts`)
 - [x] Each text delta is forwarded to the client as a new `reply_text_delta` WS message, driving a
-      live "typed" caption as Callie's reply is generated (expands the ticket's original scope —
+      live "typed" caption as Kalli's reply is generated (expands the ticket's original scope —
       confirmed via grilling on 2026-07-18)
 - [x] Deltas are also buffered server-side into a sentence accumulator (`sentenceSplitter.ts`); a
       sentence boundary is detected via regex against the buffer, or an end-of-stream flush for

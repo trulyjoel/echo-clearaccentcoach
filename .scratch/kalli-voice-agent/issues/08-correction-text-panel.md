@@ -1,6 +1,6 @@
 # 08 — Correction text panel
 
-**What to build:** The structured error list from pass 1 renders in an on-screen side panel synced to the live conversation, giving the user the fuller written breakdown alongside Callie's brief spoken correction.
+**What to build:** The structured error list from pass 1 renders in an on-screen side panel synced to the live conversation, giving the user the fuller written breakdown alongside Kalli's brief spoken correction.
 
 **Blocked by:** 07 — Two-pass correction pipeline
 

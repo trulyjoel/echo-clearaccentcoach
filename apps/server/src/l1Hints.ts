@@ -1,4 +1,4 @@
-import type { SupportedL1 } from "@callie/types";
+import type { SupportedL1 } from "@kalli/types";
 
 /**
  * Interference-pattern hints for pass 1's error-analysis prompt, one per supported L1 —

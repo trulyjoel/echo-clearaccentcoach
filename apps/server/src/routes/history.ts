@@ -3,7 +3,7 @@ import type {
   HistoryErrorEntry,
   SessionErrorsResponse,
   SessionSummary,
-} from "@callie/types";
+} from "@kalli/types";
 import { and, desc, eq, sql } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { requireUserId } from "../auth.js";

@@ -1,6 +1,6 @@
-# 03 — Teach Callie's reply prompt the emphasis-marker convention
+# 03 — Teach Kalli's reply prompt the emphasis-marker convention
 
-**What to build:** When Callie corrects a dropped short function word, she repeats the corrected
+**What to build:** When Kalli corrects a dropped short function word, she repeats the corrected
 phrase naturally in context — not as a "the little word 'X'" aside naming the word in isolation —
 and marks just that word for emphasis, using the marker convention ticket 02's resolver
 understands.

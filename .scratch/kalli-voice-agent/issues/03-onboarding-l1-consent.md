@@ -23,28 +23,28 @@ contract itself proves consent was given rather than inferring it from call succ
 
 This is the first ticket needing persistence, so it also adds the Postgres/Drizzle layer the spec calls
 for: `apps/server/src/db/schema.ts` (a `profiles` table), `drizzle.config.ts`, and a migration. Tests run
-against a real local Postgres (`callie_test`), per the spec's testing decision to not mock the DB.
+against a real local Postgres (`kalli_test`), per the spec's testing decision to not mock the DB.
 
 There's no session/recording concept in the codebase yet (that's ticket 04), so the last checkbox is
 satisfied by making `l1`/`consentGivenAt` queryable — ticket 04's own acceptance criteria explicitly owns
 wiring the actual server-side gate ("enforced server-side, per ticket 03").
 
 Status set to `ready-for-human` rather than `ready-for-agent`: this was built and tested against a local
-Postgres instance (`brew services start postgresql@18`; `callie_dev`/`callie_test` databases) since Neon
+Postgres instance (`brew services start postgresql@18`; `kalli_dev`/`kalli_test` databases) since Neon
 wasn't provisioned — a human needs to provision the production Neon database, set `DATABASE_URL` as a Fly
-secret, and run `pnpm --filter @callie/server db:migrate` against it before this is live in production.
+secret, and run `pnpm --filter @kalli/server db:migrate` against it before this is live in production.
 The Docker image build (and thus the `--experimental-strip-types` runtime fix for `apps/server` now
-importing runtime values from `@callie/types`) is also unverified end-to-end — the local Docker daemon
+importing runtime values from `@kalli/types`) is also unverified end-to-end — the local Docker daemon
 wasn't running in this environment, so only the underlying Node module-resolution mechanism was checked
 directly, not a full `docker build`.
 
 ### Update — deployed
 
-Verified the full Docker build + run locally (`docker build`/`docker run`): image builds clean, `--experimental-strip-types` correctly loads `@callie/types`' raw `.ts` source at runtime, `/health` returns 200.
+Verified the full Docker build + run locally (`docker build`/`docker run`): image builds clean, `--experimental-strip-types` correctly loads `@kalli/types`' raw `.ts` source at runtime, `/health` returns 200.
 
-Neon was provisioned and the migration applied (`pnpm --filter @callie/server db:migrate` against Neon's
-direct connection string); `DATABASE_URL` (pooled connection string) set as a Fly secret on `callie-server`;
-`callie-server` redeployed (`fly deploy . -c apps/server/fly.toml --dockerfile apps/server/Dockerfile` from
+Neon was provisioned and the migration applied (`pnpm --filter @kalli/server db:migrate` against Neon's
+direct connection string); `DATABASE_URL` (pooled connection string) set as a Fly secret on `kalli-server`;
+`kalli-server` redeployed (`fly deploy . -c apps/server/fly.toml --dockerfile apps/server/Dockerfile` from
 the repo root, since the Dockerfile's `COPY` paths need repo-root build context) and `apps/web` redeployed
 to Vercel (`vercel deploy --prod` from the repo root). Verified end-to-end in production: `/health` returns
 200, `/api/onboarding` returns 401 unauthenticated, and — via `fly ssh console` querying the DB directly

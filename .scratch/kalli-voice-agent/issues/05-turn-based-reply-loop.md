@@ -1,6 +1,6 @@
 # 05 — Turn-based conversational reply loop
 
-**What to build:** A real back-and-forth conversation with Callie. When the user finishes a turn, the backend generates a conversational reply (single LLM call, no correction logic yet), synthesizes it via ElevenLabs, streams the audio back, and it plays in the browser. No correction, no barge-in yet.
+**What to build:** A real back-and-forth conversation with Kalli. When the user finishes a turn, the backend generates a conversational reply (single LLM call, no correction logic yet), synthesizes it via ElevenLabs, streams the audio back, and it plays in the browser. No correction, no barge-in yet.
 
 **Blocked by:** 04 — Voice session plumbing (mic → live transcript)
 
@@ -32,7 +32,7 @@ Two new vendor-adapter modules mirror `deepgram.ts`'s shape exactly (typed inter
   `textToSpeech.stream()`, returning the SDK's own `ReadableStream<Uint8Array>` as an async iterable.
   Voice ID defaults to ElevenLabs' "Rachel" premade voice, overridable via `ELEVENLABS_VOICE_ID`.
 
-Reply delivery over the WebSocket mirrors how the client already streams mic audio *up*: `@callie/types`
+Reply delivery over the WebSocket mirrors how the client already streams mic audio *up*: `@kalli/types`
 gained `reply_text` (JSON, sent once the reply is generated) and `reply_audio_end` (JSON, sent once
 streaming finishes); the audio itself is **not** part of the message union — it's raw binary frames
 (`socket.send(Buffer.from(chunk))`) sent between those two JSON messages, one WS message per TTS chunk.
@@ -49,7 +49,7 @@ pushed) after the call returns; passing the live reference doesn't affect the re
 unreliable in tests, which is what surfaced it.
 
 The `turns` table (`id`, `session_id` FK, `transcript`, `reply`, `created_at`) is new
-(`apps/server/drizzle/0002_old_tomorrow_man.sql`), applied to both `callie_dev` and `callie_test`. A
+(`apps/server/drizzle/0002_old_tomorrow_man.sql`), applied to both `kalli_dev` and `kalli_test`. A
 Turn is persisted right after the LLM call succeeds — before TTS runs — since the transcript/reply pair
 is complete at that point regardless of whether audio synthesis later fails.
 

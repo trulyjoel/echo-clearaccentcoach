@@ -1,6 +1,6 @@
-# Callie
+# Kalli
 
-Conversational voice agent for L2 English coaching. See `.scratch/callie-voice-agent/spec.md` for the product spec and `.scratch/callie-voice-agent/issues/` for implementation tickets.
+Conversational voice agent for L2 English coaching. See `.scratch/kalli-voice-agent/spec.md` for the product spec and `.scratch/kalli-voice-agent/issues/` for implementation tickets.
 
 ## Repo layout
 
@@ -22,26 +22,26 @@ cp apps/web/.env.example apps/web/.env
 # ANTHROPIC_API_KEY from https://console.anthropic.com,
 # and ELEVENLABS_API_KEY from https://elevenlabs.io
 
-createdb callie_dev
-createdb callie_test
-# set DATABASE_URL in apps/server/.env to point at callie_dev, e.g.
-#   DATABASE_URL=postgresql://<you>@localhost:5432/callie_dev
-# and apps/server/.env.test (gitignored) to point at callie_test
+createdb kalli_dev
+createdb kalli_test
+# set DATABASE_URL in apps/server/.env to point at kalli_dev, e.g.
+#   DATABASE_URL=postgresql://<you>@localhost:5432/kalli_dev
+# and apps/server/.env.test (gitignored) to point at kalli_test
 #
 # apps/server/.env.test also needs CLERK_PUBLISHABLE_KEY / CLERK_SECRET_KEY so the real
 # clerkPlugin can initialize in app.test.ts (routes/session.test.ts mocks Clerk away, but
 # app.test.ts doesn't) — any syntactically valid test-mode key works, e.g.:
 #   CLERK_PUBLISHABLE_KEY=pk_test_dGVzdC5jbGVyay5hY2NvdW50cy5kZXYk
 #   CLERK_SECRET_KEY=sk_test_0000000000000000000000000000000000000000
-pnpm --filter @callie/server db:migrate
+pnpm --filter @kalli/server db:migrate
 
 pnpm dev          # runs the server (http://localhost:3000) and web app (http://localhost:5173) together
 ```
 
 Run server and web individually with `pnpm dev:server` / `pnpm dev:web`.
 
-Schema changes: edit `apps/server/src/db/schema.ts`, then `pnpm --filter @callie/server db:generate`
-to write a migration and `db:migrate` to apply it (run against both `callie_dev` and the test database).
+Schema changes: edit `apps/server/src/db/schema.ts`, then `pnpm --filter @kalli/server db:generate`
+to write a migration and `db:migrate` to apply it (run against both `kalli_dev` and the test database).
 
 ## Checks
 

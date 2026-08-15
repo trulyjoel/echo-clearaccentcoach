@@ -4,20 +4,20 @@ Status: ready-for-agent
 
 ## Problem Statement
 
-The Session screen — where a user actually talks with Callie — currently renders the live
-transcript and Callie's replies as plain, unstyled text: the user's speech accumulates into one
-growing blob for the whole session, and Callie's reply field is overwritten turn after turn so
+The Session screen — where a user actually talks with Kalli — currently renders the live
+transcript and Kalli's replies as plain, unstyled text: the user's speech accumulates into one
+growing blob for the whole session, and Kalli's reply field is overwritten turn after turn so
 only the latest one is ever visible. There is no styling anywhere in the frontend at all (no CSS
 file, no styling library). The back-and-forth of an actual conversation is hard to follow, past
 turns disappear, and the screen looks unfinished next to the coaching value it's delivering.
 
 ## Solution
 
-The Session screen's conversation area becomes a scrolling thread of speech bubbles: Callie's
+The Session screen's conversation area becomes a scrolling thread of speech bubbles: Kalli's
 turns on the left, the user's turns on the right, in a violet/lavender palette, with every past
 turn in the session still visible and scrollable rather than being overwritten. A live-updating
 draft bubble shows the user's words as they're still being spoken, and a typing-indicator bubble
-shows while Callie is composing a reply. A word or phrase flagged by the correction pipeline gets
+shows while Kalli is composing a reply. A word or phrase flagged by the correction pipeline gets
 a wavy underline directly on the flagged span inside the user's bubble, in addition to (not instead
 of) the existing structured corrections panel — clicking the underlined span scrolls to and
 highlights that error's entry in the panel. This is also the feature that introduces the project's
@@ -27,11 +27,11 @@ doesn't look inconsistent against unstyled leftovers.
 
 ## User Stories
 
-1. As a user, I want to see my own words and Callie's replies as a scrolling conversation thread, so that I can follow the back-and-forth naturally instead of reading two disconnected text blobs.
-2. As a user, I want my own turns visually distinguished from Callie's (position + color), so that I can tell at a glance who said what without reading names.
-3. As a user, I want every past turn in the session to stay visible as I keep talking, so that I can scroll back and re-read something Callie or I said earlier in the session.
+1. As a user, I want to see my own words and Kalli's replies as a scrolling conversation thread, so that I can follow the back-and-forth naturally instead of reading two disconnected text blobs.
+2. As a user, I want my own turns visually distinguished from Kalli's (position + color), so that I can tell at a glance who said what without reading names.
+3. As a user, I want every past turn in the session to stay visible as I keep talking, so that I can scroll back and re-read something Kalli or I said earlier in the session.
 4. As a user, I want to see my words appear as I'm still speaking (before the turn finalizes), so that the conversation feels responsive rather than frozen until I stop talking.
-5. As a user, I want to see an indication that Callie is "thinking" between when I finish speaking and when her reply starts, so that I know the app is working rather than stuck.
+5. As a user, I want to see an indication that Kalli is "thinking" between when I finish speaking and when her reply starts, so that I know the app is working rather than stuck.
 6. As a user, I want a bubble that gets cut off by my own barge-in to stay visible in the thread (clearly marked as cut off), so that the conversation history still reads coherently rather than having gaps.
 7. As a user, I want to see exactly which word(s) in my own turn were flagged as an error, directly on what I said, so that I don't have to cross-reference a separate panel to know what was wrong.
 8. As a user, I want the fuller written correction (what I said, what's correct, why) still available in a dedicated panel, so that the in-bubble indicator doesn't replace the detail I already rely on.
@@ -55,7 +55,7 @@ doesn't look inconsistent against unstyled leftovers.
   string, the current interim (not-yet-finalized) fragment, the most recent reply's caption only
   (older ones are overwritten), and a separately-maintained list of per-turn correction results.
 - This is replaced with a single ordered list of turns, each either a user turn or an assistant
-  (Callie) turn, carrying its own status:
+  (Kalli) turn, carrying its own status:
   - A user turn is `live` while its speech is still arriving/interim, and `final` once its
     turn boundary is reached. It optionally carries the detected errors for that turn once they
     arrive, plus their timestamp.
@@ -73,11 +73,11 @@ doesn't look inconsistent against unstyled leftovers.
   turns with attached errors) rather than being maintained as separate parallel state.
 
 **Conversation thread rendering**
-- Turns render as a vertically scrolling list of speech bubbles: Callie's turns left-aligned in a
+- Turns render as a vertically scrolling list of speech bubbles: Kalli's turns left-aligned in a
   neutral/lavender-tinted style, the user's turns right-aligned in a filled violet style, both with
   rounded corners. The thread auto-scrolls to the newest turn as it updates.
 - The typing-indicator state (assistant turn `pending`) renders as a small animated placeholder in
-  Callie's bubble position, replaced by real content once her reply starts streaming.
+  Kalli's bubble position, replaced by real content once her reply starts streaming.
 - An interrupted assistant turn keeps whatever text streamed before the cut-off, with a small
   visual note that it was cut off, rather than disappearing or being styled as an error/alert.
 - The conversation thread is exposed as a live region so a screen reader announces updates as

@@ -1,4 +1,4 @@
-import type { PersistedError } from "@callie/types";
+import type { PersistedError } from "@kalli/types";
 
 export interface MatchedSpan {
   start: number;

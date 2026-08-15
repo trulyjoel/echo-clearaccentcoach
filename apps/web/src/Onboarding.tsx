@@ -1,5 +1,5 @@
-import type { L1, OnboardingRequest } from "@callie/types";
-import { L1_VALUES } from "@callie/types";
+import type { L1, OnboardingRequest } from "@kalli/types";
+import { L1_VALUES } from "@kalli/types";
 import { useAuth } from "@clerk/react";
 import { useState } from "react";
 
@@ -58,7 +58,7 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
     return (
       <main>
         <h1>What's your native language?</h1>
-        <p>Callie uses this to watch for mistakes common to speakers of your language.</p>
+        <p>Kalli uses this to watch for mistakes common to speakers of your language.</p>
         <form
           onSubmit={(event) => {
             event.preventDefault();
@@ -89,7 +89,7 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
     <main>
       <h1>Recording consent</h1>
       <p>
-        To give you feedback, Callie records short clips of your voice around any mistakes she flags
+        To give you feedback, Kalli records short clips of your voice around any mistakes she flags
         and stores them for up to 90 days. This is separate from our general terms of service.
       </p>
       <label>

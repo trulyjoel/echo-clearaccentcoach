@@ -11,10 +11,10 @@ const USER_BUBBLE_CLASS =
 const ASSISTANT_BUBBLE_CLASS =
   "max-w-[75%] rounded-2xl rounded-bl-sm bg-lavender-100 px-4 py-2 text-lavender-900";
 
-/** Three bouncing dots shown in Callie's bubble position while her reply is still generating. */
+/** Three bouncing dots shown in Kalli's bubble position while her reply is still generating. */
 function TypingIndicator() {
   return (
-    <span role="status" aria-label="Callie is typing" className="flex items-center gap-1 px-1 py-1">
+    <span role="status" aria-label="Kalli is typing" className="flex items-center gap-1 px-1 py-1">
       <span className={`${TYPING_DOT_CLASS} [animation-delay:-0.3s]`} />
       <span className={`${TYPING_DOT_CLASS} [animation-delay:-0.15s]`} />
       <span className={TYPING_DOT_CLASS} />

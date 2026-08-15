@@ -1,12 +1,12 @@
 # 06 — Barge-in support
 
-**What to build:** A user can start speaking while Callie's reply is still playing. The backend detects this, cuts the TTS playback, and starts processing the user's new turn immediately, so the conversation feels natural rather than rigidly turn-locked.
+**What to build:** A user can start speaking while Kalli's reply is still playing. The backend detects this, cuts the TTS playback, and starts processing the user's new turn immediately, so the conversation feels natural rather than rigidly turn-locked.
 
 **Blocked by:** 05 — Turn-based conversational reply loop
 
 **Status:** ready-for-human
 
-- [x] Mic stays open and streaming during Callie's TTS playback (not just during user turns)
+- [x] Mic stays open and streaming during Kalli's TTS playback (not just during user turns)
 - [x] Backend detects user speech starting while a reply is being streamed/played
 - [x] On detected barge-in, the in-flight TTS stream to the client is stopped
 - [x] The user's new speech is processed as the start of a new turn, without requiring the previous reply to finish
@@ -74,7 +74,7 @@ behavior.
 **Update:** the real-Deepgram gap above was the actual failure mode: against a live mic, `vad_events`'s
 `SpeechStarted` fired on background noise (empty-transcript utterances), not just genuine barge-in,
 marking almost every turn interrupted within a few hundred ms — before `analyzeErrors`/`generateReply`
-ever got a chance to run, so Callie never replied. Replaced VAD-based detection with confirmed-speech
+ever got a chance to run, so Kalli never replied. Replaced VAD-based detection with confirmed-speech
 detection: `apps/server/src/routes/session.ts`'s `Results` handler now marks a turn interrupted when a
 *non-empty transcript* arrives while that turn's pipeline is active, rather than reacting to the bare
 `SpeechStarted` ping — background noise can trigger VAD but can't produce recognized words, so this is

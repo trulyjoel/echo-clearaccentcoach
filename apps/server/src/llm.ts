@@ -1,7 +1,7 @@
 import { createAnthropic } from "@ai-sdk/anthropic";
 import type { AnthropicProvider } from "@ai-sdk/anthropic";
-import type { DetectedError, L1, SupportedL1 } from "@callie/types";
-import { ERROR_CATEGORIES } from "@callie/types";
+import type { DetectedError, L1, SupportedL1 } from "@kalli/types";
+import { ERROR_CATEGORIES } from "@kalli/types";
 import { generateObject, streamText } from "ai";
 import { z } from "zod";
 import { L1_INTERFERENCE_HINTS } from "./l1Hints.js";
@@ -39,21 +39,21 @@ export interface LLMProvider {
   generateReply(history: ConversationMessage[], errors: DetectedError[]): ReplyStream;
 }
 
-const CALLIE_SYSTEM_PROMPT =
-  "You are Callie, a warm, encouraging conversational English coach. Have a natural, " +
+const KALLI_SYSTEM_PROMPT =
+  "You are Kalli, a warm, encouraging conversational English coach. Have a natural, " +
   "freeform back-and-forth with the learner — ask follow-up questions, keep replies " +
   "conversational and brief (a sentence or two), and keep the conversation moving. Sound like " +
   "a real person, not a scripted assistant — skip stock openers like \"Of course!\" or \"Happy " +
   "to help!\" and don't pose either/or menus of questions.";
 
 const NO_ERROR_EXAMPLE =
-  'Example — Learner: "Can you help me with my grammar?" Callie: "Sure — just talk normally ' +
+  'Example — Learner: "Can you help me with my grammar?" Kalli: "Sure — just talk normally ' +
   'and I\'ll jump in when something\'s off."';
 
 const ERROR_PRESENT_EXAMPLES =
-  'Example — Learner: "I saw movie last night." Callie: "What\'d you watch? Small thing — ' +
+  'Example — Learner: "I saw movie last night." Kalli: "What\'d you watch? Small thing — ' +
   '\'I saw a movie.\'"\n' +
-  'Example — Learner: "I am living here since three years." Callie: "Three years, that\'s a ' +
+  'Example — Learner: "I am living here since three years." Kalli: "Three years, that\'s a ' +
   'while — you\'d say \'I\'ve been living here for three years\' though."';
 
 const ANALYSIS_SYSTEM_PROMPT =
@@ -93,7 +93,7 @@ const errorAnalysisSchema = z.object({
 export function buildReplySystemPrompt(errors: DetectedError[]): string {
   if (errors.length === 0) {
     return (
-      `${CALLIE_SYSTEM_PROMPT}\n\n` +
+      `${KALLI_SYSTEM_PROMPT}\n\n` +
       "The learner's last message had no detected errors — reply naturally, with no " +
       `correction.\n\n${NO_ERROR_EXAMPLE}`
     );
@@ -105,7 +105,7 @@ export function buildReplySystemPrompt(errors: DetectedError[]): string {
     )
     .join("\n");
   return (
-    `${CALLIE_SYSTEM_PROMPT}\n\n` +
+    `${KALLI_SYSTEM_PROMPT}\n\n` +
     `The learner's last message had these errors:\n${errorList}\n\n` +
     "Pick the single most relevant one and weave a brief, natural spoken correction into your " +
     `reply. Don't list every error or lecture — keep the conversation moving.\n\n` +

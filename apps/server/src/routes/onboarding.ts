@@ -1,5 +1,5 @@
-import type { L1, OnboardingRequest, OnboardingStatusResponse } from "@callie/types";
-import { L1_VALUES } from "@callie/types";
+import type { L1, OnboardingRequest, OnboardingStatusResponse } from "@kalli/types";
+import { L1_VALUES } from "@kalli/types";
 import { eq } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { requireUserId } from "../auth.js";

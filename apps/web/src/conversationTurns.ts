@@ -1,4 +1,4 @@
-import type { PersistedError } from "@callie/types";
+import type { PersistedError } from "@kalli/types";
 
 export interface UserTurn {
   kind: "user";
@@ -50,7 +50,7 @@ export function applyTranscript(turns: readonly Turn[], text: string, isFinal: b
 }
 
 /**
- * Applies `end_of_turn`: closes out the currently-open user turn (if any) and opens Callie's
+ * Applies `end_of_turn`: closes out the currently-open user turn (if any) and opens Kalli's
  * next turn as a pending typing indicator, since her turn starts the instant the user's ends.
  */
 export function endTurn(turns: readonly Turn[]): Turn[] {
@@ -63,7 +63,7 @@ export function endTurn(turns: readonly Turn[]): Turn[] {
   return [...closed, pending];
 }
 
-/** Appends a streamed reply chunk, starting Callie's turn if a delta arrives with none open. */
+/** Appends a streamed reply chunk, starting Kalli's turn if a delta arrives with none open. */
 export function appendAssistantDelta(turns: readonly Turn[], delta: string): Turn[] {
   const last = lastTurn(turns);
   if (last?.kind === "assistant" && last.status !== "final" && last.status !== "interrupted") {
@@ -77,14 +77,14 @@ export function appendAssistantDelta(turns: readonly Turn[], delta: string): Tur
   return [...turns, { kind: "assistant", status: "streaming", text: delta }];
 }
 
-/** Replaces Callie's in-progress reply text with the authoritative full string once it arrives. */
+/** Replaces Kalli's in-progress reply text with the authoritative full string once it arrives. */
 export function finalizeAssistantText(turns: readonly Turn[], text: string): Turn[] {
   const last = lastTurn(turns);
   if (last?.kind !== "assistant") return turns.slice();
   return [...turns.slice(0, -1), { ...last, text }];
 }
 
-/** Marks Callie's in-progress turn complete, once its audio finishes playing. */
+/** Marks Kalli's in-progress turn complete, once its audio finishes playing. */
 export function finalizeAssistantTurn(turns: readonly Turn[]): Turn[] {
   const last = lastTurn(turns);
   if (last?.kind !== "assistant" || last.status === "final") return turns.slice();
@@ -92,7 +92,7 @@ export function finalizeAssistantTurn(turns: readonly Turn[]): Turn[] {
 }
 
 /**
- * Marks Callie's in-progress turn cut short by barge-in or a pipeline error, keeping whatever
+ * Marks Kalli's in-progress turn cut short by barge-in or a pipeline error, keeping whatever
  * text had streamed so far (rather than discarding it) so the conversation history still reads
  * coherently.
  */

@@ -2,9 +2,9 @@
 
 ## Problem
 
-The Session view (`apps/web/src/Session.tsx`) currently renders the live transcript and Callie's
+The Session view (`apps/web/src/Session.tsx`) currently renders the live transcript and Kalli's
 replies as plain, unstyled `<p>` text that accumulates into two growing blobs — one string for
-everything the user has said across the whole session, one for Callie's most recent reply only
+everything the user has said across the whole session, one for Kalli's most recent reply only
 (older replies are overwritten). There is no styling anywhere in `apps/web` at all: no CSS file,
 no styling library, nothing. This makes the back-and-forth conversation hard to follow and gives
 the app no visual identity.
@@ -12,7 +12,7 @@ the app no visual identity.
 ## Goals
 
 - Restyle the Session view as a scrolling thread of alternating speech bubbles (user right-aligned,
-  Callie left-aligned), full turn-by-turn history, not just the current turn.
+  Kalli left-aligned), full turn-by-turn history, not just the current turn.
 - Establish Tailwind CSS as the project's styling foundation (nothing exists yet to build on).
 - Extend today's inline correction experience: keep the existing corrections side panel, and add a
   wavy underline directly on the flagged words inside the user's bubble, linked to that panel entry.
@@ -39,7 +39,7 @@ itself:
 
 - `apps/web/vite.config.ts`: add `@tailwindcss/vite` to the `plugins` array.
 - `apps/web/src/index.css` (new): `@import "tailwindcss";` plus an `@theme` block defining the
-  violet/lavender accent tokens used by the bubbles (e.g. `--color-callie-bubble`,
+  violet/lavender accent tokens used by the bubbles (e.g. `--color-kalli-bubble`,
   `--color-user-bubble`).
 - `apps/web/src/main.tsx`: import `./index.css` once, above the `createRoot` call.
 
@@ -150,9 +150,9 @@ threaded onto `end_of_turn` or the transcript messages.
 
 ## Visual decisions (validated via the visual companion)
 
-- **Layout:** classic messaging style — Callie's bubbles left-aligned, user's bubbles right-aligned,
+- **Layout:** classic messaging style — Kalli's bubbles left-aligned, user's bubbles right-aligned,
   rounded corners with a "tail" corner pointing toward the edge.
 - **Palette:** violet/lavender accent (`#7c3aed`-family for the user's filled bubble, a pale lavender
-  tint for Callie's neutral bubble), over a very light neutral page background.
+  tint for Kalli's neutral bubble), over a very light neutral page background.
 - **Inline error indicator:** a wavy underline directly on the flagged word span within the user's
   bubble (not a corner badge or a below-bubble link).

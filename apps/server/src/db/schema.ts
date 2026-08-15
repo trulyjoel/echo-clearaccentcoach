@@ -1,4 +1,4 @@
-import { ERROR_CATEGORIES, L1_VALUES, SESSION_END_REASONS } from "@callie/types";
+import { ERROR_CATEGORIES, L1_VALUES, SESSION_END_REASONS } from "@kalli/types";
 import { boolean, integer, pgEnum, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
 
 export const l1Enum = pgEnum("l1", [...L1_VALUES]);

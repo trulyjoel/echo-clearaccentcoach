@@ -1,4 +1,4 @@
-import type { ServerToClientMessage } from "@callie/types";
+import type { ServerToClientMessage } from "@kalli/types";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -273,7 +273,7 @@ describe("Session", () => {
     await waitFor(() => {
       expect(screen.getByText("I am good")).toBeInTheDocument();
     });
-    // Both the first turn's transcript and Callie's reply are still on screen, not overwritten.
+    // Both the first turn's transcript and Kalli's reply are still on screen, not overwritten.
     expect(screen.getByText("hello there")).toBeInTheDocument();
     expect(screen.getByText("Hi! How are you?")).toBeInTheDocument();
   });
@@ -375,12 +375,12 @@ describe("Session", () => {
     ws.emitServerMessage({ type: "end_of_turn" });
 
     await waitFor(() => {
-      expect(screen.getByRole("status", { name: "Callie is typing" })).toBeInTheDocument();
+      expect(screen.getByRole("status", { name: "Kalli is typing" })).toBeInTheDocument();
     });
 
     ws.emitServerMessage({ type: "reply_text_delta", text: "Hi!" });
     await waitFor(() => {
-      expect(screen.queryByRole("status", { name: "Callie is typing" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("status", { name: "Kalli is typing" })).not.toBeInTheDocument();
     });
     expect(screen.getByText("Hi!")).toBeInTheDocument();
   });

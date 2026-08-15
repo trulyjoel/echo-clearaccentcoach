@@ -38,7 +38,7 @@ describe("AuthenticatedApp", () => {
     render(<AuthenticatedApp />);
 
     await waitFor(() => {
-      expect(screen.getByText("Callie")).toBeInTheDocument();
+      expect(screen.getByText("Kalli")).toBeInTheDocument();
     });
     expect(screen.queryByText("What's your native language?")).not.toBeInTheDocument();
   });
@@ -82,7 +82,7 @@ describe("AuthenticatedApp", () => {
     await user.click(screen.getByRole("button", { name: "Start practicing" }));
 
     await waitFor(() => {
-      expect(screen.getByText("Callie")).toBeInTheDocument();
+      expect(screen.getByText("Kalli")).toBeInTheDocument();
     });
     expect(fetchMock).toHaveBeenCalledTimes(4);
   });

@@ -1,11 +1,11 @@
 # 05 — Wire word emphasis into the live reply/TTS pipeline
 
-**What to build:** In an actual session, when Callie's reply marks a word for emphasis, the
+**What to build:** In an actual session, when Kalli's reply marks a word for emphasis, the
 learner sees plain, marker-free text in the chat exactly as before, while the audio they hear gets
 a deliberate pause (and, when applicable, the emphatic pronunciation) right on that word — and
 nothing marker-related ever leaks into the stored conversation history or the saved turn record.
 
-**Blocked by:** 02 — Inline emphasis marker resolution, 03 — Teach Callie's reply prompt the
+**Blocked by:** 02 — Inline emphasis marker resolution, 03 — Teach Kalli's reply prompt the
 emphasis-marker convention
 
 **Status:** ready-for-agent

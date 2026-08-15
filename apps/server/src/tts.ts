@@ -11,7 +11,7 @@ export interface TTSProvider {
 /**
  * Strips double-quote characters before text reaches the TTS model. `eleven_flash_v2_5` skips
  * text normalization for latency and reads unusual punctuation density literally rather than as
- * prosody — quoted phrases (common when Callie repeats back a corrected phrase) came out sounding
+ * prosody — quoted phrases (common when Kalli repeats back a corrected phrase) came out sounding
  * like mispronounced punctuation. Apostrophes are left untouched since they're load-bearing for
  * contractions ("I'll", "you'd").
  */

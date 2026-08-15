@@ -26,9 +26,6 @@ importers:
       '@aws-sdk/client-s3':
         specifier: 3.1090.0
         version: 3.1090.0
-      '@callie/types':
-        specifier: workspace:*
-        version: link:../../packages/types
       '@clerk/fastify':
         specifier: 3.1.52
         version: 3.1.52(fastify@5.10.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
@@ -44,6 +41,9 @@ importers:
       '@fastify/websocket':
         specifier: 11.3.0
         version: 11.3.0
+      '@kalli/types':
+        specifier: workspace:*
+        version: link:../../packages/types
       ai:
         specifier: 7.0.31
         version: 7.0.31(zod@4.4.3)
@@ -78,12 +78,12 @@ importers:
 
   apps/web:
     dependencies:
-      '@callie/types':
-        specifier: workspace:*
-        version: link:../../packages/types
       '@clerk/react':
         specifier: 6.12.5
         version: 6.12.5(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
+      '@kalli/types':
+        specifier: workspace:*
+        version: link:../../packages/types
       react:
         specifier: 19.2.7
         version: 19.2.7

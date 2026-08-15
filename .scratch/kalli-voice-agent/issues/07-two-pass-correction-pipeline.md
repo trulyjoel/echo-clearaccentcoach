@@ -1,6 +1,6 @@
 # 07 — Two-pass correction pipeline
 
-**What to build:** Turn processing splits into an analysis pass and a reply pass. The analysis pass produces a structured error list (category, original text, corrected text, explanation) using a generic taxonomy (word order, verb tense/aspect, subject-verb agreement, article usage, preposition choice) — no L1-specific hints yet. The reply pass weaves a brief spoken correction into Callie's conversational reply.
+**What to build:** Turn processing splits into an analysis pass and a reply pass. The analysis pass produces a structured error list (category, original text, corrected text, explanation) using a generic taxonomy (word order, verb tense/aspect, subject-verb agreement, article usage, preposition choice) — no L1-specific hints yet. The reply pass weaves a brief spoken correction into Kalli's conversational reply.
 
 **Blocked by:** 05 — Turn-based conversational reply loop
 
@@ -24,7 +24,7 @@ depends on the other.
 AI SDK's `generateObject` against a `zod` schema shaped exactly like `DetectedError[]`, wrapped in
 `{ errors: [...] }` (the SDK's object-mode requires a top-level object, not a bare array). Pass 2's
 `generateReply` now also takes the pass-1 error list; `buildReplySystemPrompt` appends the error
-list to `CALLIE_SYSTEM_PROMPT` and asks the model to pick the single most relevant one and weave
+list to `KALLI_SYSTEM_PROMPT` and asks the model to pick the single most relevant one and weave
 it in briefly — or, if the list is empty, appends an explicit "no correction" instruction rather
 than leaving it to chance. Choosing *which* error is most relevant is left to pass 2's judgment
 (it sees the full list plus conversation context pass 1 doesn't have) rather than pass 1 ranking
@@ -41,7 +41,7 @@ either means no coherent turn to save.
 
 New migration `apps/server/drizzle/0003_puzzling_morgan_stark.sql` adds the `error_category` enum
 and `turn_errors` table (`id`, `turn_id` FK, `category`, `original`, `corrected`, `explanation`,
-`created_at`), applied to both `callie_dev` and `callie_test`.
+`created_at`), applied to both `kalli_dev` and `kalli_test`.
 
 Testing: `session.test.ts`'s `llmTestState` fake gained `analyzeErrors` (default: no errors) and
 `generateReply` now records the `errors` argument it was called with. New `"two-pass correction

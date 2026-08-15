@@ -1,4 +1,4 @@
-import type { CategoryFrequency, SessionErrorsResponse, SessionSummary } from "@callie/types";
+import type { CategoryFrequency, SessionErrorsResponse, SessionSummary } from "@kalli/types";
 import { useAuth } from "@clerk/react";
 import { useEffect, useState } from "react";
 import { apiFetch } from "./api.js";

@@ -1,4 +1,4 @@
-import type { PersistedError } from "@callie/types";
+import type { PersistedError } from "@kalli/types";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
@@ -34,7 +34,7 @@ describe("ConversationThread", () => {
     expect(bubble.parentElement).toHaveClass("justify-end");
   });
 
-  it("left-aligns Callie's turns in a neutral lavender tint", () => {
+  it("left-aligns Kalli's turns in a neutral lavender tint", () => {
     const turns: Turn[] = [{ kind: "assistant", status: "final", text: "Nice job!" }];
     render(<ConversationThread turns={turns} />);
 
@@ -71,12 +71,12 @@ describe("ConversationThread", () => {
     expect(log.scrollTop).toBe(400);
   });
 
-  describe("Callie's turn statuses", () => {
+  describe("Kalli's turn statuses", () => {
     it("shows a typing indicator, and no text, while pending", () => {
       const turns: Turn[] = [{ kind: "assistant", status: "pending", text: "" }];
       render(<ConversationThread turns={turns} />);
 
-      expect(screen.getByRole("status", { name: "Callie is typing" })).toBeInTheDocument();
+      expect(screen.getByRole("status", { name: "Kalli is typing" })).toBeInTheDocument();
     });
 
     it("shows the accumulated text plainly while streaming", () => {
@@ -84,7 +84,7 @@ describe("ConversationThread", () => {
       render(<ConversationThread turns={turns} />);
 
       expect(screen.getByText("Nice")).toBeInTheDocument();
-      expect(screen.queryByRole("status", { name: "Callie is typing" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("status", { name: "Kalli is typing" })).not.toBeInTheDocument();
     });
 
     it("shows the full text plainly once final", () => {

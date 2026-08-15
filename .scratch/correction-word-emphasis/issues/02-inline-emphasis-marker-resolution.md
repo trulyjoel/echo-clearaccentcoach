@@ -1,10 +1,10 @@
 # 02 — Inline emphasis marker resolution
 
-**What to build:** A way to turn Callie's reply text — which may contain an inline marker around
+**What to build:** A way to turn Kalli's reply text — which may contain an inline marker around
 one word she wants to emphasize — into two views: plain text (marker removed, exactly the word
 itself) for anything the user sees or that gets remembered as conversation history, and a
 speech-ready version (marker replaced by a short pause plus the strong-form respelling, when one
-exists) for what actually gets spoken. Must handle the marker arriving in pieces, since Callie's
+exists) for what actually gets spoken. Must handle the marker arriving in pieces, since Kalli's
 reply streams in as it's generated, and must not lose any text if the reply ends mid-marker.
 
 **Blocked by:** 01 — Weak-to-strong-form respelling table

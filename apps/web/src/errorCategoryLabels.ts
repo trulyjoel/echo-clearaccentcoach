@@ -1,4 +1,4 @@
-import type { ErrorCategory } from "@callie/types";
+import type { ErrorCategory } from "@kalli/types";
 
 export const CATEGORY_LABELS: Record<ErrorCategory, string> = {
   word_order: "Word order",

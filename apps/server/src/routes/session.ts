@@ -5,7 +5,7 @@ import type {
   PersistedError,
   ServerToClientMessage,
   SessionEndReason,
-} from "@callie/types";
+} from "@kalli/types";
 import { eq } from "drizzle-orm";
 import type { FastifyBaseLogger, FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { AsyncQueue } from "../asyncQueue.js";

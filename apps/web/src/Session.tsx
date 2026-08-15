@@ -1,4 +1,4 @@
-import type { ClientToServerMessage, PersistedError, ServerToClientMessage } from "@callie/types";
+import type { ClientToServerMessage, PersistedError, ServerToClientMessage } from "@kalli/types";
 import { useAuth } from "@clerk/react";
 import { type RefObject, useCallback, useEffect, useRef, useState } from "react";
 import { apiFetch, getApiBaseUrl } from "./api.js";

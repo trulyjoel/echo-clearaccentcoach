@@ -1,4 +1,4 @@
-import type { OnboardingStatusResponse } from "@callie/types";
+import type { OnboardingStatusResponse } from "@kalli/types";
 import { useAuth } from "@clerk/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Home } from "./Home.js";

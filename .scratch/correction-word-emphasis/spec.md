@@ -5,7 +5,7 @@ Status: ready-for-agent
 ## Problem
 
 When a learner drops a short function word (e.g. "I want to speak well for meeting" instead of
-"...for the meeting"), Callie's spoken correction currently repeats the corrected phrase at normal
+"...for the meeting"), Kalli's spoken correction currently repeats the corrected phrase at normal
 conversational pace. Short function words (articles, some prepositions) get spoken with a reduced
 vowel by default and pass by too fast for the learner to register them as the point of the
 correction — reported symptom: "the TTS sentence runs along too fast, 'word the before meeting'."
@@ -19,7 +19,7 @@ This follows directly from two things established in the prior debugging session
 
 ## Goals
 
-- Make Callie's spoken correction audibly distinct for short, easily-swallowed corrected words —
+- Make Kalli's spoken correction audibly distinct for short, easily-swallowed corrected words —
   primarily articles and common prepositions — without a model swap or added TTS latency budget
   beyond a single short pause per correction.
 - Keep the mechanism category-agnostic: driven by "is the corrected word short and easy to miss,"
