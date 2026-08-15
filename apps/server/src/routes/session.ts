@@ -113,6 +113,22 @@ export function registerSessionRoutes(app: FastifyInstance): void {
         socket.close();
       }
 
+      // The client starts streaming audio the instant its WebSocket reports open, which happens
+      // as soon as the HTTP upgrade completes — well before this handler finishes its DB lookups
+      // and the Deepgram handshake below. `ws`'s 'message' event isn't buffered for late
+      // listeners, so registering the real handler only after that setup silently drops however
+      // many chunks arrive in the meantime, always including the first one — which is the only
+      // chunk carrying the WebM container header, corrupting the entire stream for every session.
+      // Registering a listener immediately, before any of that async work, and queueing messages
+      // until the real handler replaces it below closes that gap regardless of setup latency.
+      const bufferedMessages: Array<{ message: Buffer; isBinary: boolean }> = [];
+      let handleSocketMessage = (message: Buffer, isBinary: boolean): void => {
+        bufferedMessages.push({ message, isBinary });
+      };
+      socket.on("message", (message: Buffer, isBinary: boolean) =>
+        handleSocketMessage(message, isBinary),
+      );
+
       // preValidation already confirmed the user is authenticated.
       const userId = getAuthenticatedUserId(request);
       if (!userId) {
@@ -455,7 +471,7 @@ export function registerSessionRoutes(app: FastifyInstance): void {
         void endSession("error");
       });
 
-      socket.on("message", (message: Buffer, isBinary: boolean) => {
+      handleSocketMessage = (message: Buffer, isBinary: boolean) => {
         if (isBinary) {
           deepgramConnection.sendMedia(message);
           turnAudioChunks.push(message);
@@ -474,7 +490,9 @@ export function registerSessionRoutes(app: FastifyInstance): void {
         if (parsed.type === "reply_playback_ended") {
           replyPlaying = false;
         }
-      });
+      };
+      for (const { message, isBinary } of bufferedMessages) handleSocketMessage(message, isBinary);
+      bufferedMessages.length = 0;
 
       socket.on("close", () => {
         void endSession("disconnected");
