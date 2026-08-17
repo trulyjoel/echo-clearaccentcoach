@@ -43,6 +43,13 @@
       "when": 1784379560208,
       "tag": "0005_daily_the_captain",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1786832443906,
+      "tag": "0006_fluffy_cyclops",
+      "breakpoints": true
     }
   ]
 }

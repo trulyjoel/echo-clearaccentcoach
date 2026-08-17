@@ -19,6 +19,7 @@ export interface TokenUsage {
 export interface AnalysisResult {
   errors: DetectedError[];
   usage: TokenUsage;
+  model: string;
 }
 
 /**
@@ -30,6 +31,7 @@ export interface AnalysisResult {
 export interface ReplyStream {
   textStream: AsyncIterable<string>;
   usage: Promise<TokenUsage>;
+  model: string;
 }
 
 export interface LLMProvider {
@@ -150,23 +152,25 @@ function toTokenUsage(usage: {
 
 class AnthropicLLMProvider implements LLMProvider {
   async analyzeErrors(transcript: string, l1: L1): Promise<AnalysisResult> {
+    const model = getAnalysisModelId();
     const { object, usage } = await generateObject({
-      model: getClient()(getAnalysisModelId()),
+      model: getClient()(model),
       schema: errorAnalysisSchema,
       system: buildAnalysisSystemPrompt(l1),
       prompt: transcript,
     });
-    return { errors: object.errors, usage: toTokenUsage(usage) };
+    return { errors: object.errors, usage: toTokenUsage(usage), model };
   }
 
   generateReply(history: ConversationMessage[], errors: DetectedError[]): ReplyStream {
+    const model = getReplyModelId();
     const result = streamText({
-      model: getClient()(getReplyModelId()),
+      model: getClient()(model),
       system: buildReplySystemPrompt(errors),
       messages: history,
     });
     const usage = Promise.resolve(result.usage).then(toTokenUsage);
-    return { textStream: result.textStream, usage };
+    return { textStream: result.textStream, usage, model };
   }
 }
 

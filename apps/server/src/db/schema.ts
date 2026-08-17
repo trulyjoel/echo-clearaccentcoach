@@ -62,10 +62,14 @@ export const usageRecords = pgTable("usage_records", {
     .unique()
     .references(() => sessions.id),
   deepgramSeconds: integer("deepgram_seconds").notNull().default(0),
+  deepgramModel: text("deepgram_model"),
   elevenlabsCharacters: integer("elevenlabs_characters").notNull().default(0),
+  elevenlabsModel: text("elevenlabs_model"),
   analysisInputTokens: integer("analysis_input_tokens").notNull().default(0),
   analysisOutputTokens: integer("analysis_output_tokens").notNull().default(0),
+  analysisModel: text("analysis_model"),
   replyInputTokens: integer("reply_input_tokens").notNull().default(0),
   replyOutputTokens: integer("reply_output_tokens").notNull().default(0),
+  replyModel: text("reply_model"),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });

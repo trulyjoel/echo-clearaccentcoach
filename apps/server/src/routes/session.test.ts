@@ -97,6 +97,7 @@ const deepgramTestState = vi.hoisted(() => {
 });
 
 vi.mock("../deepgram.js", () => ({
+  DEEPGRAM_MODEL: "nova-3",
   openDeepgramConnection: deepgramTestState.openDeepgramConnection,
 }));
 
@@ -108,6 +109,8 @@ interface TokenUsage {
 const llmTestState = vi.hoisted(() => {
   const DEFAULT_ANALYZE_USAGE: TokenUsage = { inputTokens: 8, outputTokens: 2 };
   const DEFAULT_REPLY_USAGE: TokenUsage = { inputTokens: 10, outputTokens: 5 };
+  const MOCK_ANALYSIS_MODEL = "mock-analysis-model";
+  const MOCK_REPLY_MODEL = "mock-reply-model";
   let replyImpl: (
     history: ConversationMessage[],
     errors: DetectedError[],
@@ -149,12 +152,14 @@ const llmTestState = vi.hoisted(() => {
     getReplyErrorArgs: (): DetectedError[][] => replyErrorArgs,
     getAnalyzeCalls: (): string[] => analyzeCalls,
     getAnalyzeL1Calls: (): L1[] => analyzeL1Calls,
+    analysisModel: MOCK_ANALYSIS_MODEL,
+    replyModel: MOCK_REPLY_MODEL,
     getLLMProvider: vi.fn(() => ({
       analyzeErrors: async (transcript: string, l1: L1) => {
         analyzeCalls.push(transcript);
         analyzeL1Calls.push(l1);
         const errors = await analyzeImpl(transcript, l1);
-        return { errors, usage: analyzeUsage };
+        return { errors, usage: analyzeUsage, model: MOCK_ANALYSIS_MODEL };
       },
       // Adapts the still Promise<string>-shaped `replyImpl` fixtures used throughout this file
       // into the real (streaming) LLMProvider contract: the whole reply text arrives as one
@@ -173,7 +178,7 @@ const llmTestState = vi.hoisted(() => {
         // (simulating an LLM failure) would otherwise surface as an unhandled rejection here,
         // since nothing else attaches a handler to this specific derived promise.
         usage.catch(() => {});
-        return { textStream: textStream(), usage };
+        return { textStream: textStream(), usage, model: MOCK_REPLY_MODEL };
       },
     })),
   };
@@ -209,7 +214,10 @@ const ttsTestState = vi.hoisted(() => {
   };
 });
 
-vi.mock("../tts.js", () => ({ getTTSProvider: ttsTestState.getTTSProvider }));
+vi.mock("../tts.js", () => ({
+  ELEVENLABS_MODEL: "eleven_flash_v2_5",
+  getTTSProvider: ttsTestState.getTTSProvider,
+}));
 
 const storageTestState = vi.hoisted(() => {
   const uploads: Array<{ key: string; data: Buffer; contentType: string }> = [];
@@ -1313,9 +1321,12 @@ describe("usage metering", () => {
     expect(usage).toMatchObject({
       analysisInputTokens: 20,
       analysisOutputTokens: 4,
+      analysisModel: llmTestState.analysisModel,
       replyInputTokens: 30,
       replyOutputTokens: 12,
+      replyModel: llmTestState.replyModel,
       elevenlabsCharacters: "Nice job!".length,
+      elevenlabsModel: "eleven_flash_v2_5",
     });
 
     ws.terminate();
@@ -1373,6 +1384,7 @@ describe("usage metering", () => {
       .from(usageRecords)
       .where(eq(usageRecords.sessionId, sessionId));
     expect(usage?.deepgramSeconds).toBeGreaterThanOrEqual(0);
+    expect(usage?.deepgramModel).toBe("nova-3");
 
     await app.close();
   });

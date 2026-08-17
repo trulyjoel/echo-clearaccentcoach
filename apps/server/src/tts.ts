@@ -3,6 +3,8 @@ import { ElevenLabsClient } from "@elevenlabs/elevenlabs-js";
 /** ElevenLabs' "Rachel" premade voice — an existing preset voice, per the ticket's scope. */
 const DEFAULT_VOICE_ID = "21m00Tcm4TlvDq8ikWAM";
 
+export const ELEVENLABS_MODEL = "eleven_flash_v2_5";
+
 export interface TTSProvider {
   /** Synthesizes `text` to speech, streamed as audio chunks as they're produced. */
   synthesize(text: string): Promise<AsyncIterable<Uint8Array>>;
@@ -42,7 +44,7 @@ class ElevenLabsTTSProvider implements TTSProvider {
   async synthesize(text: string): Promise<AsyncIterable<Uint8Array>> {
     return getClient().textToSpeech.stream(getVoiceId(), {
       text: sanitizeForSpeech(text),
-      modelId: "eleven_flash_v2_5",
+      modelId: ELEVENLABS_MODEL,
       outputFormat: "mp3_44100_128",
     });
   }

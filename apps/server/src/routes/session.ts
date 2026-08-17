@@ -14,12 +14,12 @@ import { getAuthenticatedUserId } from "../auth.js";
 import { db } from "../db/client.js";
 import { profiles, sessions, turnErrors, turns } from "../db/schema.js";
 import type { DeepgramConnection } from "../deepgram.js";
-import { openDeepgramConnection } from "../deepgram.js";
+import { DEEPGRAM_MODEL, openDeepgramConnection } from "../deepgram.js";
 import type { AnalysisResult, ConversationMessage, TokenUsage } from "../llm.js";
 import { getLLMProvider } from "../llm.js";
 import { getMaxSessionDurationMs, hasReachedDailySessionCap } from "../sessionLimits.js";
 import { splitSentences } from "../sentenceSplitter.js";
-import { getTTSProvider } from "../tts.js";
+import { ELEVENLABS_MODEL, getTTSProvider } from "../tts.js";
 import { ensureUsageRecord, recordUsage } from "../usage.js";
 
 /**
@@ -170,7 +170,10 @@ export function registerSessionRoutes(app: FastifyInstance): void {
           .set({ endedAt, endReason: reason })
           .where(eq(sessions.id, sessionId));
         const durationSeconds = Math.round((endedAt.getTime() - sessionStartedAt.getTime()) / 1000);
-        await recordUsage(sessionId, { deepgramSeconds: durationSeconds });
+        await recordUsage(sessionId, {
+          deepgramSeconds: durationSeconds,
+          deepgramModel: DEEPGRAM_MODEL,
+        });
         send({ type: "session_ended", reason });
         socket.close();
       }
@@ -233,6 +236,7 @@ export function registerSessionRoutes(app: FastifyInstance): void {
             textFailed: false;
             replyText: string;
             usage: TokenUsage;
+            model: string;
             waitForAudio: () => Promise<{ audioFailed: boolean }>;
           }
       > {
@@ -250,7 +254,10 @@ export function registerSessionRoutes(app: FastifyInstance): void {
               if (aborted()) return;
               // Characters are billed by ElevenLabs as soon as the call is made, regardless of
               // whether the resulting stream is fully consumed.
-              await recordUsage(sessionId, { elevenlabsCharacters: sentence.length });
+              await recordUsage(sessionId, {
+                elevenlabsCharacters: sentence.length,
+                elevenlabsModel: ELEVENLABS_MODEL,
+              });
               const audioChunks = await getTTSProvider().synthesize(sentence);
               for await (const chunk of audioChunks) {
                 if (aborted()) return;
@@ -296,6 +303,7 @@ export function registerSessionRoutes(app: FastifyInstance): void {
           textFailed: false,
           replyText,
           usage,
+          model: replyStream.model,
           waitForAudio: async () => {
             await audioTask;
             return { audioFailed };
@@ -343,15 +351,17 @@ export function registerSessionRoutes(app: FastifyInstance): void {
             sendPipelineFailure("Could not generate a reply");
             return;
           }
-          const { replyText, usage, waitForAudio } = result;
+          const { replyText, usage, model: replyModel, waitForAudio } = result;
           pendingAudio = waitForAudio;
           // The vendor calls already ran and were billed regardless of what happens next (abort,
           // persistence failure), so token usage is recorded unconditionally here.
           await recordUsage(sessionId, {
             analysisInputTokens: analysis.usage.inputTokens,
             analysisOutputTokens: analysis.usage.outputTokens,
+            analysisModel: analysis.model,
             replyInputTokens: usage.inputTokens,
             replyOutputTokens: usage.outputTokens,
+            replyModel,
           });
           if (aborted()) return;
           conversationHistory.push({ role: "assistant", content: replyText });

@@ -1,5 +1,7 @@
 import { DeepgramClient } from "@deepgram/sdk";
 
+export const DEEPGRAM_MODEL = "nova-3";
+
 export interface DeepgramResultsMessage {
   type: "Results";
   is_final?: boolean;
@@ -41,7 +43,7 @@ function getClient(): DeepgramClient {
 /** Opens a live transcription connection to Deepgram, open and ready to receive audio. */
 export async function openDeepgramConnection(): Promise<DeepgramConnection> {
   const connection = (await getClient().listen.v1.connect({
-    model: "nova-3",
+    model: DEEPGRAM_MODEL,
     language: "en",
     punctuate: "true",
     interim_results: "true",
