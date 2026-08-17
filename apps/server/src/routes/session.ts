@@ -179,15 +179,7 @@ export function registerSessionRoutes(app: FastifyInstance): void {
       }
 
       const conversationHistory: ConversationMessage[] = [];
-      let turnTranscriptParts: string[] = [];
       let turnAudioChunks: Buffer[] = [];
-      /**
-       * Whether the current turn has already been flushed (by `speech_final` or `UtteranceEnd`).
-       * Deepgram can send both for the same turn — this makes the second one a true no-op,
-       * including its `send({ type: "end_of_turn" })`, not just the `handleTurn` call. Reset the
-       * instant new transcript activity arrives, marking the next turn as open again.
-       */
-      let turnFlushed = false;
 
       /**
        * Tracks the turn whose LLM/TTS pipeline is currently running, so a subsequent confirmed
@@ -419,44 +411,24 @@ export function registerSessionRoutes(app: FastifyInstance): void {
         return;
       }
 
-      /**
-       * Ends the current turn and hands it to `handleTurn`, draining the buffered transcript and
-       * audio. Called from both `speech_final` and the `UtteranceEnd` fallback below; `turnFlushed`
-       * is what makes calling this from both a true no-op the second time — including suppressing
-       * the duplicate `end_of_turn` — so a `speech_final` immediately followed by `UtteranceEnd`,
-       * which Deepgram's docs say can happen, doesn't double-process the turn or leave the client
-       * with two typing indicators (one stuck forever once the real reply lands in the other).
-       */
-      function flushTurn(): void {
-        if (turnFlushed) return;
-        turnFlushed = true;
-        send({ type: "end_of_turn" });
-        const turnTranscript = turnTranscriptParts.join(" ").trim();
-        turnTranscriptParts = [];
-        const turnAudio = Buffer.concat(turnAudioChunks);
-        turnAudioChunks = [];
-        if (turnTranscript) void handleTurn(turnTranscript, turnAudio);
+      /** Shared by both the connection's own `error` event and a `FatalError` protocol message. */
+      function handleTranscriptionError(error: Error): void {
+        request.log.error(error, "Deepgram connection error");
+        send({ type: "error", message: "Transcription error" });
+        void endSession("error");
       }
 
       deepgramConnection.on("message", (data) => {
-        // Endpointing's speech_final is a known-flaky signal (Deepgram's own docs: background
-        // noise/VAD interaction can prevent it from ever firing) — UtteranceEnd is Deepgram's
-        // documented independent fallback for exactly that case, so a turn doesn't get stuck
-        // waiting on a signal that never arrives.
-        if (data.type === "UtteranceEnd") {
-          flushTurn();
+        if (data.type === "FatalError") {
+          handleTranscriptionError(new Error("Deepgram FatalError"));
           return;
         }
-        if (data.type !== "Results") return;
-        const transcript = data.channel.alternatives[0]?.transcript ?? "";
-        if (!transcript) return;
-        turnFlushed = false;
+        if (data.type !== "TurnInfo") return;
 
-        // A non-empty transcript arriving while a turn's pipeline is running, or its reply is
-        // still audibly playing, is real barge-in — unlike a bare VAD "speech started" ping,
-        // background noise can't produce recognized words, so this can't false-trigger on
-        // breathing or room noise the way VAD alone can.
-        if (activeTurn || replyPlaying) {
+        // StartOfTurn fires once, when Flux itself judges the user has started speaking — unlike
+        // Nova-3's raw transcript stream, this is already the model's own confirmed-speech signal,
+        // not a bare VAD ping, so no extra "was this really words" check is needed here.
+        if (data.event === "StartOfTurn" && (activeTurn || replyPlaying)) {
           if (activeTurn) {
             activeTurn.interrupted = true;
             activeTurn = null;
@@ -465,17 +437,21 @@ export function registerSessionRoutes(app: FastifyInstance): void {
           send({ type: "reply_interrupted", reason: "barge_in" });
         }
 
-        send({ type: "transcript", text: transcript, isFinal: data.is_final ?? false });
-        if (data.is_final) turnTranscriptParts.push(transcript);
+        // EndOfTurn carries the full assembled transcript for the turn — Flux, not this app,
+        // handles combining fragments, so there's no per-turn accumulation to do here.
+        if (data.event === "EndOfTurn") {
+          if (data.transcript) send({ type: "transcript", text: data.transcript, isFinal: true });
+          send({ type: "end_of_turn" });
+          const turnAudio = Buffer.concat(turnAudioChunks);
+          turnAudioChunks = [];
+          if (data.transcript) void handleTurn(data.transcript, turnAudio);
+          return;
+        }
 
-        if (data.speech_final) flushTurn();
+        if (data.transcript) send({ type: "transcript", text: data.transcript, isFinal: false });
       });
 
-      deepgramConnection.on("error", (error) => {
-        request.log.error(error, "Deepgram connection error");
-        send({ type: "error", message: "Transcription error" });
-        void endSession("error");
-      });
+      deepgramConnection.on("error", handleTranscriptionError);
 
       deepgramConnection.on("close", () => {
         void endSession("error");

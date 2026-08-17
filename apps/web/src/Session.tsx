@@ -429,7 +429,8 @@ export function Session() {
         recorder.ondataavailable = (event) => {
           if (event.data.size > 0 && ws.readyState === WebSocket.OPEN) ws.send(event.data);
         };
-        recorder.start(250);
+        // Deepgram's Flux docs recommend ~80ms chunks for optimal turn-detection latency.
+        recorder.start(80);
       };
 
       ws.onmessage = (event) => {

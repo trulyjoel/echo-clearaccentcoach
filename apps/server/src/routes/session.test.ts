@@ -4,7 +4,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { db } from "../db/client.js";
 import { audioClips, profiles, sessions, turnErrors, turns, usageRecords } from "../db/schema.js";
-import type { DeepgramConnection, DeepgramMessage } from "../deepgram.js";
+import type { DeepgramConnection, DeepgramMessage, DeepgramTurnInfoMessage } from "../deepgram.js";
 import type { ConversationMessage } from "../llm.js";
 
 type InjectedWebSocket = Awaited<ReturnType<FastifyInstance["injectWS"]>>;
@@ -97,9 +97,29 @@ const deepgramTestState = vi.hoisted(() => {
 });
 
 vi.mock("../deepgram.js", () => ({
-  DEEPGRAM_MODEL: "nova-3",
+  DEEPGRAM_MODEL: "flux-general-en",
   openDeepgramConnection: deepgramTestState.openDeepgramConnection,
 }));
+
+/** turn_index isn't read by the app today, so every fixture below uses a fixed placeholder. */
+function emitTurnInfo(event: DeepgramTurnInfoMessage["event"], transcript = ""): void {
+  deepgramTestState.getLatest()?.emitMessage({
+    type: "TurnInfo",
+    event,
+    turn_index: 0,
+    transcript,
+  });
+}
+
+/** Ends a turn with Flux's authoritative EndOfTurn event, carrying the full turn transcript. */
+function emitEndOfTurn(transcript: string): void {
+  emitTurnInfo("EndOfTurn", transcript);
+}
+
+/** The barge-in signal — Flux's own confirmed-speech-onset event. */
+function emitStartOfTurn(transcript = ""): void {
+  emitTurnInfo("StartOfTurn", transcript);
+}
 
 interface TokenUsage {
   inputTokens: number;
@@ -412,12 +432,7 @@ describe("GET /api/session", () => {
     const queue = messageQueue(ws);
     await queue.next(); // session_started
 
-    deepgramTestState.getLatest()?.emitMessage({
-      type: "Results",
-      is_final: false,
-      speech_final: false,
-      channel: { alternatives: [{ transcript: "hello there" }] },
-    });
+    emitTurnInfo("Update", "hello there");
 
     expect(await queue.next()).toEqual({ type: "transcript", text: "hello there", isFinal: false });
 
@@ -425,7 +440,7 @@ describe("GET /api/session", () => {
     await app.close();
   });
 
-  it("signals end_of_turn when Deepgram marks a result speech_final", async () => {
+  it("signals end_of_turn when Flux marks EndOfTurn", async () => {
     await giveConsent();
     const app = buildApp();
     await app.ready();
@@ -436,12 +451,7 @@ describe("GET /api/session", () => {
     const queue = messageQueue(ws);
     await queue.next(); // session_started
 
-    deepgramTestState.getLatest()?.emitMessage({
-      type: "Results",
-      is_final: true,
-      speech_final: true,
-      channel: { alternatives: [{ transcript: "goodbye" }] },
-    });
+    emitEndOfTurn("goodbye");
     expect(await queue.next()).toEqual({ type: "transcript", text: "goodbye", isFinal: true });
     expect(await queue.next()).toEqual({ type: "end_of_turn" });
 
@@ -557,15 +567,6 @@ describe("GET /api/session", () => {
 });
 
 describe("turn-based reply loop", () => {
-  function emitSpeechFinal(transcript: string): void {
-    deepgramTestState.getLatest()?.emitMessage({
-      type: "Results",
-      is_final: true,
-      speech_final: true,
-      channel: { alternatives: [{ transcript }] },
-    });
-  }
-
   it("generates a reply and streams synthesized audio after end_of_turn", async () => {
     await giveConsent();
     const app = buildApp();
@@ -577,7 +578,7 @@ describe("turn-based reply loop", () => {
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
 
-    emitSpeechFinal("hello Kalli");
+    emitEndOfTurn("hello Kalli");
 
     expect(await queue.next()).toEqual({
       kind: "json",
@@ -617,7 +618,7 @@ describe("turn-based reply loop", () => {
     };
     const sessionId = started.message.sessionId;
 
-    emitSpeechFinal("hello Kalli");
+    emitEndOfTurn("hello Kalli");
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
     await queue.next(); // reply_text_delta
@@ -642,7 +643,7 @@ describe("turn-based reply loop", () => {
     await app.close();
   });
 
-  it("concatenates multiple finalized segments into one turn transcript", async () => {
+  it("signals end_of_turn but does not start a turn when EndOfTurn carries no transcript", async () => {
     await giveConsent();
     const app = buildApp();
     await app.ready();
@@ -653,165 +654,11 @@ describe("turn-based reply loop", () => {
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
 
-    deepgramTestState.getLatest()?.emitMessage({
-      type: "Results",
-      is_final: true,
-      speech_final: false,
-      channel: { alternatives: [{ transcript: "hello" }] },
-    });
-    deepgramTestState.getLatest()?.emitMessage({
-      type: "Results",
-      is_final: true,
-      speech_final: true,
-      channel: { alternatives: [{ transcript: "Kalli" }] },
-    });
+    emitEndOfTurn("");
 
-    await queue.next(); // transcript "hello"
-    await queue.next(); // transcript "Kalli"
-    await queue.next(); // end_of_turn
-
-    expect(llmTestState.getCalls()).toEqual([[{ role: "user", content: "hello Kalli" }]]);
-
-    // Drain the rest of the pipeline before tearing down, per the note above.
-    await queue.next(); // reply_text_delta
-    await queue.next(); // audio chunk
-    await queue.next(); // audio chunk
-    await queue.next(); // reply_text
-    await queue.next(); // reply_audio_end
-
-    ws.terminate();
-    await app.close();
-  });
-
-  it("still signals end_of_turn on speech_final when no finalized segment was buffered", async () => {
-    // Deepgram's own docs show speech_final: true arriving on a result where is_final is still
-    // false — the client needs to know the turn ended even though nothing made it into the
-    // transcript buffer yet, so it doesn't treat the mic as still "listening".
-    await giveConsent();
-    const app = buildApp();
-    await app.ready();
-
-    const ws = await app.injectWS("/api/session", {
-      headers: { authorization: "Bearer test-user-session-456" },
-    });
-    const queue = mixedQueue(ws);
-    await queue.next(); // session_started
-
-    deepgramTestState.getLatest()?.emitMessage({
-      type: "Results",
-      is_final: false,
-      speech_final: true,
-      channel: { alternatives: [{ transcript: "hello" }] },
-    });
-
-    await queue.next(); // transcript
+    // No transcript message either — nothing was recognized to relay.
     expect(await queue.next()).toEqual({ kind: "json", message: { type: "end_of_turn" } });
     expect(llmTestState.getCalls()).toHaveLength(0);
-
-    ws.terminate();
-    await app.close();
-  });
-
-  it("falls back to UtteranceEnd to end the turn when speech_final never arrives", async () => {
-    await giveConsent();
-    const app = buildApp();
-    await app.ready();
-
-    const ws = await app.injectWS("/api/session", {
-      headers: { authorization: "Bearer test-user-session-456" },
-    });
-    const queue = mixedQueue(ws);
-    await queue.next(); // session_started
-
-    deepgramTestState.getLatest()?.emitMessage({
-      type: "Results",
-      is_final: true,
-      speech_final: false,
-      channel: { alternatives: [{ transcript: "hello Kalli" }] },
-    });
-    await queue.next(); // transcript
-
-    deepgramTestState.getLatest()?.emitMessage({ type: "UtteranceEnd" });
-
-    expect(await queue.next()).toEqual({ kind: "json", message: { type: "end_of_turn" } });
-    expect(llmTestState.getCalls()).toEqual([[{ role: "user", content: "hello Kalli" }]]);
-
-    // Drain the rest of the pipeline before tearing down, per the note above.
-    await queue.next(); // reply_text_delta
-    await queue.next(); // audio chunk
-    await queue.next(); // audio chunk
-    await queue.next(); // reply_text
-    await queue.next(); // reply_audio_end
-
-    ws.terminate();
-    await app.close();
-  });
-
-  it("ignores UtteranceEnd when speech_final already ended the turn", async () => {
-    await giveConsent();
-    const app = buildApp();
-    await app.ready();
-
-    const ws = await app.injectWS("/api/session", {
-      headers: { authorization: "Bearer test-user-session-456" },
-    });
-    const queue = mixedQueue(ws);
-    await queue.next(); // session_started
-
-    emitSpeechFinal("hello Kalli");
-    await queue.next(); // transcript
-    await queue.next(); // end_of_turn
-
-    deepgramTestState.getLatest()?.emitMessage({ type: "UtteranceEnd" });
-
-    // Drain the one legitimate turn's pipeline.
-    await queue.next(); // reply_text_delta
-    await queue.next(); // audio chunk
-    await queue.next(); // audio chunk
-    await queue.next(); // reply_text
-    await queue.next(); // reply_audio_end
-
-    // Give any wrongly-triggered second turn a chance to start before asserting it didn't.
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(llmTestState.getCalls()).toHaveLength(1);
-
-    ws.terminate();
-    await app.close();
-  });
-
-  it("does not send a second end_of_turn for the UtteranceEnd that follows speech_final", async () => {
-    await giveConsent();
-    const app = buildApp();
-    await app.ready();
-
-    const ws = await app.injectWS("/api/session", {
-      headers: { authorization: "Bearer test-user-session-456" },
-    });
-    const queue = mixedQueue(ws);
-    await queue.next(); // session_started
-
-    emitSpeechFinal("hello Kalli");
-    await queue.next(); // transcript
-    await queue.next(); // end_of_turn
-
-    deepgramTestState.getLatest()?.emitMessage({ type: "UtteranceEnd" });
-
-    // Drain the one legitimate turn's pipeline.
-    await queue.next(); // reply_text_delta
-    await queue.next(); // audio chunk
-    await queue.next(); // audio chunk
-    await queue.next(); // reply_text
-    await queue.next(); // reply_audio_end
-
-    // Nothing else should arrive — in particular, no second end_of_turn from the UtteranceEnd.
-    const raceResult = await Promise.race([
-      queue.next().then((frame) => ({ timedOut: false, frame })),
-      new Promise((resolve) => setTimeout(resolve, 50)).then(() => ({
-        timedOut: true,
-        frame: undefined,
-      })),
-    ]);
-    expect(raceResult).toEqual({ timedOut: true, frame: undefined });
 
     ws.terminate();
     await app.close();
@@ -833,10 +680,10 @@ describe("turn-based reply loop", () => {
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
 
-    emitSpeechFinal("first turn");
+    emitEndOfTurn("first turn");
     await drainOneTurn(queue);
 
-    emitSpeechFinal("second turn");
+    emitEndOfTurn("second turn");
     await drainOneTurn(queue);
 
     expect(llmTestState.getCalls()[1]).toEqual([
@@ -867,7 +714,7 @@ describe("turn-based reply loop", () => {
     };
     const sessionId = started.message.sessionId;
 
-    emitSpeechFinal("hello Kalli");
+    emitEndOfTurn("hello Kalli");
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
     expect(await queue.next()).toEqual({
@@ -901,7 +748,7 @@ describe("turn-based reply loop", () => {
     };
     const sessionId = started.message.sessionId;
 
-    emitSpeechFinal("hello Kalli");
+    emitEndOfTurn("hello Kalli");
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
     await queue.next(); // reply_text_delta
@@ -931,15 +778,6 @@ describe("turn-based reply loop", () => {
 });
 
 describe("two-pass correction pipeline", () => {
-  function emitSpeechFinal(transcript: string): void {
-    deepgramTestState.getLatest()?.emitMessage({
-      type: "Results",
-      is_final: true,
-      speech_final: true,
-      channel: { alternatives: [{ transcript }] },
-    });
-  }
-
   const sampleError: DetectedError = {
     category: "subject_verb_agreement",
     original: "she go",
@@ -959,7 +797,7 @@ describe("two-pass correction pipeline", () => {
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
 
-    emitSpeechFinal("she go to school");
+    emitEndOfTurn("she go to school");
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
     await queue.next(); // reply_text_delta
@@ -991,7 +829,7 @@ describe("two-pass correction pipeline", () => {
     };
     const sessionId = started.message.sessionId;
 
-    emitSpeechFinal("she go to school");
+    emitEndOfTurn("she go to school");
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
     await queue.next(); // reply_text_delta
@@ -1025,7 +863,7 @@ describe("two-pass correction pipeline", () => {
     };
     const sessionId = started.message.sessionId;
 
-    emitSpeechFinal("hello Kalli");
+    emitEndOfTurn("hello Kalli");
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
     await queue.next(); // reply_text_delta
@@ -1063,7 +901,7 @@ describe("two-pass correction pipeline", () => {
     };
     const sessionId = started.message.sessionId;
 
-    emitSpeechFinal("hello Kalli");
+    emitEndOfTurn("hello Kalli");
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
     expect(await queue.next()).toEqual({
@@ -1082,15 +920,6 @@ describe("two-pass correction pipeline", () => {
 });
 
 describe("correction text panel", () => {
-  function emitSpeechFinal(transcript: string): void {
-    deepgramTestState.getLatest()?.emitMessage({
-      type: "Results",
-      is_final: true,
-      speech_final: true,
-      channel: { alternatives: [{ transcript }] },
-    });
-  }
-
   const sampleError: DetectedError = {
     category: "subject_verb_agreement",
     original: "she go",
@@ -1110,7 +939,7 @@ describe("correction text panel", () => {
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
 
-    emitSpeechFinal("she go to school");
+    emitEndOfTurn("she go to school");
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
     await queue.next(); // reply_text_delta
@@ -1148,7 +977,7 @@ describe("correction text panel", () => {
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
 
-    emitSpeechFinal("hello Kalli");
+    emitEndOfTurn("hello Kalli");
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
     await queue.next(); // reply_text_delta
@@ -1167,15 +996,6 @@ describe("correction text panel", () => {
 });
 
 describe("L1-driven interference hints", () => {
-  function emitSpeechFinal(transcript: string): void {
-    deepgramTestState.getLatest()?.emitMessage({
-      type: "Results",
-      is_final: true,
-      speech_final: true,
-      channel: { alternatives: [{ transcript }] },
-    });
-  }
-
   /** Drains one turn: transcript, end_of_turn, reply_text_delta, 2 audio chunks, reply_text, audio_end. */
   async function drainOneTurn(queue: { next: () => Promise<QueuedFrame> }): Promise<void> {
     for (let i = 0; i < 7; i++) await queue.next();
@@ -1192,7 +1012,7 @@ describe("L1-driven interference hints", () => {
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
 
-    emitSpeechFinal("she go to school");
+    emitEndOfTurn("she go to school");
     await drainOneTurn(queue);
 
     expect(llmTestState.getAnalyzeL1Calls()).toEqual(["mandarin"]);
@@ -1212,7 +1032,7 @@ describe("L1-driven interference hints", () => {
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
 
-    emitSpeechFinal("she go to school");
+    emitEndOfTurn("she go to school");
     await drainOneTurn(queue);
 
     expect(llmTestState.getAnalyzeL1Calls()).toEqual(["other"]);
@@ -1279,15 +1099,6 @@ describe("session limits", () => {
 });
 
 describe("usage metering", () => {
-  function emitSpeechFinal(transcript: string): void {
-    deepgramTestState.getLatest()?.emitMessage({
-      type: "Results",
-      is_final: true,
-      speech_final: true,
-      channel: { alternatives: [{ transcript }] },
-    });
-  }
-
   it("records LLM token usage and ElevenLabs characters synthesized for a turn", async () => {
     await giveConsent();
     llmTestState.setAnalyzeUsage({ inputTokens: 20, outputTokens: 4 });
@@ -1305,7 +1116,7 @@ describe("usage metering", () => {
     };
     const sessionId = started.message.sessionId;
 
-    emitSpeechFinal("hello Kalli");
+    emitEndOfTurn("hello Kalli");
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
     await queue.next(); // reply_text_delta
@@ -1349,7 +1160,7 @@ describe("usage metering", () => {
     const sessionId = started.message.sessionId;
 
     for (let i = 0; i < 2; i++) {
-      emitSpeechFinal("hello Kalli");
+      emitEndOfTurn("hello Kalli");
       for (let j = 0; j < 6; j++) await queue.next();
     }
 
@@ -1384,22 +1195,13 @@ describe("usage metering", () => {
       .from(usageRecords)
       .where(eq(usageRecords.sessionId, sessionId));
     expect(usage?.deepgramSeconds).toBeGreaterThanOrEqual(0);
-    expect(usage?.deepgramModel).toBe("nova-3");
+    expect(usage?.deepgramModel).toBe("flux-general-en");
 
     await app.close();
   });
 });
 
 describe("audio clip capture + storage", () => {
-  function emitSpeechFinal(transcript: string): void {
-    deepgramTestState.getLatest()?.emitMessage({
-      type: "Results",
-      is_final: true,
-      speech_final: true,
-      channel: { alternatives: [{ transcript }] },
-    });
-  }
-
   const sampleError: DetectedError = {
     category: "subject_verb_agreement",
     original: "she go",
@@ -1427,7 +1229,7 @@ describe("audio clip capture + storage", () => {
     ws.send(Buffer.from([4, 5]));
     await new Promise((resolve) => setTimeout(resolve, 20));
 
-    emitSpeechFinal("she go to school");
+    emitEndOfTurn("she go to school");
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
     await queue.next(); // turn_errors
@@ -1464,7 +1266,7 @@ describe("audio clip capture + storage", () => {
     ws.send(Buffer.from([1, 2, 3]));
     await new Promise((resolve) => setTimeout(resolve, 20));
 
-    emitSpeechFinal("hello Kalli");
+    emitEndOfTurn("hello Kalli");
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
     await queue.next(); // reply_text_delta
@@ -1495,12 +1297,12 @@ describe("audio clip capture + storage", () => {
     // transcript, end_of_turn, turn_errors, reply_text_delta, 2 audio chunks, reply_text, audio_end.
     ws.send(Buffer.from([1]));
     await new Promise((resolve) => setTimeout(resolve, 20));
-    emitSpeechFinal("first turn");
+    emitEndOfTurn("first turn");
     for (let i = 0; i < 8; i++) await queue.next();
 
     ws.send(Buffer.from([2]));
     await new Promise((resolve) => setTimeout(resolve, 20));
-    emitSpeechFinal("second turn");
+    emitEndOfTurn("second turn");
     for (let i = 0; i < 8; i++) await queue.next();
 
     const uploads = storageTestState.getUploads();
@@ -1514,25 +1316,6 @@ describe("audio clip capture + storage", () => {
 });
 
 describe("barge-in support", () => {
-  function emitSpeechFinal(transcript: string): void {
-    deepgramTestState.getLatest()?.emitMessage({
-      type: "Results",
-      is_final: true,
-      speech_final: true,
-      channel: { alternatives: [{ transcript }] },
-    });
-  }
-
-  /** Recognized speech arriving mid-utterance — the confirmed signal that drives barge-in. */
-  function emitInterimSpeech(transcript: string): void {
-    deepgramTestState.getLatest()?.emitMessage({
-      type: "Results",
-      is_final: false,
-      speech_final: false,
-      channel: { alternatives: [{ transcript }] },
-    });
-  }
-
   it("does nothing when speech starts and no reply is in progress", async () => {
     await giveConsent();
     const app = buildApp();
@@ -1546,7 +1329,7 @@ describe("barge-in support", () => {
 
     // With no turn in flight, recognized speech is just an ordinary transcript — no
     // reply_interrupted is queued ahead of it.
-    emitInterimSpeech("hi");
+    emitStartOfTurn("hi");
     expect(await queue.next()).toEqual({
       kind: "json",
       message: { type: "transcript", text: "hi", isFinal: false },
@@ -1578,14 +1361,14 @@ describe("barge-in support", () => {
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
 
-    emitSpeechFinal("hello Kalli");
+    emitEndOfTurn("hello Kalli");
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
     await queue.next(); // reply_text_delta
     expect(await queue.next()).toEqual({ kind: "binary", data: Buffer.from([1]) });
     await queue.next(); // reply_text — sent independently of (and racing) the audio side
 
-    emitInterimSpeech("wait");
+    emitStartOfTurn("wait");
     expect(await queue.next()).toEqual({
       kind: "json",
       message: { type: "reply_interrupted", reason: "barge_in" },
@@ -1627,14 +1410,14 @@ describe("barge-in support", () => {
     };
     const sessionId = started.message.sessionId;
 
-    emitSpeechFinal("hello Kalli");
+    emitEndOfTurn("hello Kalli");
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
     await queue.next(); // reply_text_delta
     await queue.next(); // audio chunk 1
     await queue.next(); // reply_text — the Turn is persisted before this is sent
 
-    emitInterimSpeech("wait");
+    emitStartOfTurn("wait");
     await queue.next(); // reply_interrupted
     resolveContinue();
     // Give the interrupted turn's continuation a tick to run.
@@ -1666,19 +1449,20 @@ describe("barge-in support", () => {
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
 
-    emitSpeechFinal("first turn");
+    emitEndOfTurn("first turn");
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
 
-    // The new turn's own recognized speech is itself the confirmation of barge-in — no
-    // separate signal needed. It's processed immediately, without waiting for the
-    // interrupted turn's still-pending LLM call to resolve.
+    // StartOfTurn is the barge-in signal; EndOfTurn (which follows it, as Flux always sends
+    // both for a real utterance) is what completes the new turn. It's processed immediately,
+    // without waiting for the interrupted turn's still-pending LLM call to resolve.
     llmTestState.setReplyImpl(async () => "Nice job!");
-    emitSpeechFinal("second turn");
+    emitStartOfTurn();
     expect(await queue.next()).toEqual({
       kind: "json",
       message: { type: "reply_interrupted", reason: "barge_in" },
     });
+    emitEndOfTurn("second turn");
     expect(await queue.next()).toEqual({
       kind: "json",
       message: { type: "transcript", text: "second turn", isFinal: true },
@@ -1722,11 +1506,11 @@ describe("barge-in support", () => {
     };
     const sessionId = started.message.sessionId;
 
-    emitSpeechFinal("first turn");
+    emitEndOfTurn("first turn");
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
 
-    emitInterimSpeech("wait");
+    emitStartOfTurn("wait");
     expect(await queue.next()).toEqual({
       kind: "json",
       message: { type: "reply_interrupted", reason: "barge_in" },
@@ -1753,7 +1537,7 @@ describe("barge-in support", () => {
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
 
-    emitSpeechFinal("hello Kalli");
+    emitEndOfTurn("hello Kalli");
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
     await queue.next(); // reply_text_delta
@@ -1763,7 +1547,7 @@ describe("barge-in support", () => {
     await queue.next(); // reply_audio_end — the pipeline has fully finished; nothing is "active"
     // server-side except the client's not-yet-reported playback of the audio it just received.
 
-    emitInterimSpeech("wait");
+    emitStartOfTurn("wait");
     expect(await queue.next()).toEqual({
       kind: "json",
       message: { type: "reply_interrupted", reason: "barge_in" },
@@ -1784,7 +1568,7 @@ describe("barge-in support", () => {
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
 
-    emitSpeechFinal("hello Kalli");
+    emitEndOfTurn("hello Kalli");
     await queue.next(); // transcript
     await queue.next(); // end_of_turn
     await queue.next(); // reply_text_delta
@@ -1796,7 +1580,7 @@ describe("barge-in support", () => {
     ws.send(JSON.stringify({ type: "reply_playback_ended" }));
     await new Promise((resolve) => setTimeout(resolve, 20));
 
-    emitSpeechFinal("second turn");
+    emitEndOfTurn("second turn");
     expect(await queue.next()).toEqual({
       kind: "json",
       message: { type: "transcript", text: "second turn", isFinal: true },

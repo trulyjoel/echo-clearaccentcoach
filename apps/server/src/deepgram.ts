@@ -1,19 +1,26 @@
 import { DeepgramClient } from "@deepgram/sdk";
 
-export const DEEPGRAM_MODEL = "nova-3";
+export const DEEPGRAM_MODEL = "flux-general-en";
 
-export interface DeepgramResultsMessage {
-  type: "Results";
-  is_final?: boolean;
-  speech_final?: boolean;
-  channel: { alternatives: Array<{ transcript: string }> };
+export interface DeepgramTurnInfoMessage {
+  type: "TurnInfo";
+  event: "Update" | "StartOfTurn" | "EagerEndOfTurn" | "TurnResumed" | "EndOfTurn" | string;
+  turn_index: number;
+  transcript: string;
 }
 
-/** The message types Deepgram's live API can send; only Results carries a transcript. */
+/**
+ * The message types Flux's live API can send; only TurnInfo carries a transcript or turn
+ * event. `FatalError` is a protocol-level error distinct from the connection's own `error`
+ * event and is routed the same way (session-ending) rather than silently dropped like the
+ * handshake/config acks.
+ */
 export type DeepgramMessage =
-  | DeepgramResultsMessage
-  | { type: "Metadata" }
-  | { type: "UtteranceEnd" };
+  | DeepgramTurnInfoMessage
+  | { type: "Connected" }
+  | { type: "ConfigureSuccess" }
+  | { type: "ConfigureFailure" }
+  | { type: "FatalError" };
 
 export interface DeepgramConnection {
   connect(): void;
@@ -42,21 +49,23 @@ function getClient(): DeepgramClient {
 
 /** Opens a live transcription connection to Deepgram, open and ready to receive audio. */
 export async function openDeepgramConnection(): Promise<DeepgramConnection> {
-  const connection = (await getClient().listen.v1.connect({
+  const connection = (await getClient().listen.v2.connect({
     model: DEEPGRAM_MODEL,
-    language: "en",
-    punctuate: "true",
-    interim_results: "true",
-    // Deepgram's default (10ms of silence) is tuned for short chatbot-style utterances and
-    // finalizes on any brief mid-sentence breath, prematurely ending a turn the user hasn't
-    // actually finished — 300ms is Deepgram's own recommended value for conversational speech
-    // where speakers pause mid-thought.
-    endpointing: "300",
-    // Endpointing's speech_final can fail to fire at all (VAD/background-noise interaction is a
-    // known Deepgram limitation, not just an edge case) and leave a turn stuck forever. Deepgram's
-    // own docs recommend running UtteranceEnd alongside it as an independent fallback signal —
-    // 1000ms is its documented minimum.
-    utterance_end_ms: "1000",
+    // `encoding`/`sample_rate` are deliberately omitted: both are for non-containerized/raw
+    // audio. The browser sends containerized WebM/Opus, which Flux auto-detects the same way
+    // Nova-3 did.
+    // Deepgram's stated default — the confidence Flux itself requires before it decides the
+    // turn is over. Unlike Nova-3's endpointing, this is a model judgment, not a silence
+    // timer, so it isn't a straight port of the old 300ms value.
+    eot_threshold: "0.7",
+    // Forces a turn to end after this much time regardless of confidence, so a turn can't
+    // get stuck forever if the model never reaches eot_threshold — same purpose as Nova-3's
+    // utterance_end_ms fallback, at Deepgram's stated default.
+    eot_timeout_ms: "5000",
+    // `eager_eot_threshold` is deliberately left unset: per the SDK's own docs, setting it is
+    // what opts a session into EagerEndOfTurn/TurnResumed events (start-reply-early +
+    // cancel-on-resumed-speech). That's a further latency optimization for later, not part of
+    // this migration — leaving it unset means the connection never emits those events.
     // The WS connect call doesn't inherit the client's apiKey as an auth header — Deepgram's
     // scheme is "Authorization: Token <key>", unlike the REST client's own auth provider.
     Authorization: `Token ${getApiKey()}`,
