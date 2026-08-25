@@ -93,28 +93,36 @@ A thin `fetch`-based client — no new SDK dependency, since DeepInfra has no of
 the request is a single streaming `POST`:
 
 ```ts
-class KokoroTTSProvider implements TTSProvider {
-  async synthesize(text: string): Promise<{ audio: AsyncIterable<Uint8Array>; model: string }> {
-    const voiceId = process.env["DEEPINFRA_VOICE_ID"] ?? "af_heart";
-    const response = await fetch(
-      `https://api.deepinfra.com/v1/text-to-speech/${voiceId}/stream?output_format=mp3`,
-      {
-        method: "POST",
-        headers: {
-          "xi-api-key": getDeepInfraApiKey(),
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({ text: sanitizeForSpeech(text), model_id: KOKORO_MODEL }),
+export const KOKORO_MODEL = "hexgrad/Kokoro-82M";
+
+/** Calls DeepInfra's Kokoro endpoint for a specific voice — factored out so the voice-comparison
+ * script (see below) can request multiple candidate voices without duplicating the request shape. */
+export async function synthesizeKokoro(
+  text: string,
+  voiceId: string,
+): Promise<{ audio: AsyncIterable<Uint8Array>; model: string }> {
+  const response = await fetch(
+    `https://api.deepinfra.com/v1/text-to-speech/${voiceId}/stream?output_format=mp3`,
+    {
+      method: "POST",
+      headers: {
+        "xi-api-key": getDeepInfraApiKey(),
+        "content-type": "application/json",
       },
-    );
-    if (!response.ok || !response.body) {
-      throw new Error(`DeepInfra TTS request failed: ${response.status} ${await response.text()}`);
-    }
-    return { audio: response.body, model: KOKORO_MODEL };
+      body: JSON.stringify({ text: sanitizeForSpeech(text), model_id: KOKORO_MODEL }),
+    },
+  );
+  if (!response.ok || !response.body) {
+    throw new Error(`DeepInfra TTS request failed: ${response.status} ${await response.text()}`);
   }
+  return { audio: response.body, model: KOKORO_MODEL };
 }
 
-export const KOKORO_MODEL = "hexgrad/Kokoro-82M";
+class KokoroTTSProvider implements TTSProvider {
+  synthesize(text: string): Promise<{ audio: AsyncIterable<Uint8Array>; model: string }> {
+    return synthesizeKokoro(text, process.env["DEEPINFRA_VOICE_ID"] ?? "af_heart");
+  }
+}
 ```
 
 (`response.body` is a Node `ReadableStream`, which is an `AsyncIterable<Uint8Array>` — no adapter
@@ -164,11 +172,39 @@ this session," not "ElevenLabs cost."
 - `session.test.ts` / `usage.test.ts` (if present) updated for the `ttsCharacters`/`ttsModel` field
   rename — behavior unchanged, just the field names.
 
+## Voice comparison tool
+
+A checked-in script, `apps/server/src/scripts/compareTts.ts`, generates one standard test phrase
+through ElevenLabs and through several candidate Kokoro voices, so voice/quality can be judged by
+listening rather than guessed at. Reusable beyond this migration — the same script works for
+evaluating another TTS vendor later, or re-picking the voice if Kalli's tone changes.
+
+- **Test phrase** lives in the script as `KALLI_TEST_PHRASE`, written to look like a real Kalli
+  turn rather than generic filler — warm tone, one corrected-phrase quote (exercises
+  `sanitizeForSpeech`), one contraction (exercises the apostrophe-preserving path):
+
+  > "That's a great try! Quick correction though — instead of saying "I have went to the store,"
+  > you'd say "I went to the store." Want to practice that one more time?"
+
+- **Candidates**: ElevenLabs using whatever voice `ELEVENLABS_VOICE_ID`/default resolves to, plus a
+  fixed list of Kokoro voice IDs to compare: `af_heart`, `af_bella`, `af_nicole`, `af_sky` — American
+  English female voices in Kokoro's preset list, picked as plausible analogs to ElevenLabs'
+  "Rachel." The script calls `synthesizeKokoro(KALLI_TEST_PHRASE, voiceId)` per candidate and
+  `ElevenLabsTTSProvider`'s existing `synthesize()` once, reusing production code paths rather than
+  reimplementing request logic.
+- **Output**: each candidate's audio is written to `apps/server/tts-comparison/<candidate>.mp3`
+  (e.g. `elevenlabs.mp3`, `kokoro-af_heart.mp3`) for local playback. `tts-comparison/` is added to
+  `.gitignore` — generated audio never gets committed.
+- **Invocation**: `pnpm --filter @kalli/server compare-tts`, added to `apps/server/package.json` as
+  `"compare-tts": "tsx --env-file=.env src/scripts/compareTts.ts"`. Requires both
+  `DEEPINFRA_API_KEY` and `ELEVENLABS_API_KEY` set locally, regardless of `TTS_PROVIDER` — the
+  script talks to both vendors directly, independent of the runtime toggle.
+
 ## Rollout
 
 Since the toggle defaults to `kokoro`, deploying this change switches production cost immediately.
-Before merging: a manual listening comparison of a few real Kalli reply sentences (including one
-with a corrected-phrase quote, to sanity-check `sanitizeForSpeech` still helps) through both
-providers, since audio quality is subjective and not something the test suite can verify. If
-quality is unacceptable, flipping `TTS_PROVIDER=elevenlabs` in the Fly.io environment is the
-rollback — no code change or redeploy needed.
+Before merging: run `compare-tts` and listen through the candidates to confirm Kokoro quality is
+acceptable and pick the closest-matching voice for `DEEPINFRA_VOICE_ID`, since audio quality is
+subjective and not something the automated test suite can verify. If quality is unacceptable after
+shipping, flipping `TTS_PROVIDER=elevenlabs` in the Fly.io environment is the rollback — no code
+change or redeploy needed.
