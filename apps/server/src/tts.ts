@@ -64,12 +64,15 @@ function getDeepInfraApiKey(): string {
   return apiKey;
 }
 
-/** Calls DeepInfra's Kokoro endpoint for a specific voice — factored out so the voice-comparison
- * script (`src/scripts/compareTts.ts`) can request multiple candidate voices without duplicating
- * the request shape. */
-export async function synthesizeKokoro(
+/** Calls DeepInfra's ElevenLabs-compatible TTS endpoint for a specific model and voice — factored
+ * out so the voice-comparison script (`src/scripts/compareTts.ts`) can request multiple candidate
+ * models/voices (Kokoro, CSM-1B, ...) without duplicating the request shape. DeepInfra hosts
+ * several open TTS models behind this same `/v1/text-to-speech/{voice_id}/stream` facade,
+ * distinguished only by `model_id`. */
+export async function synthesizeDeepInfraTTS(
   text: string,
   voiceId: string,
+  modelId: string,
 ): Promise<{ audio: AsyncIterable<Uint8Array>; model: string }> {
   const response = await fetch(
     `https://api.deepinfra.com/v1/text-to-speech/${voiceId}/stream?output_format=mp3`,
@@ -79,13 +82,20 @@ export async function synthesizeKokoro(
         "xi-api-key": getDeepInfraApiKey(),
         "content-type": "application/json",
       },
-      body: JSON.stringify({ text: sanitizeForSpeech(text), model_id: KOKORO_MODEL }),
+      body: JSON.stringify({ text: sanitizeForSpeech(text), model_id: modelId }),
     },
   );
   if (!response.ok || !response.body) {
     throw new Error(`DeepInfra TTS request failed: ${response.status} ${await response.text()}`);
   }
-  return { audio: response.body, model: KOKORO_MODEL };
+  return { audio: response.body, model: modelId };
+}
+
+export function synthesizeKokoro(
+  text: string,
+  voiceId: string,
+): Promise<{ audio: AsyncIterable<Uint8Array>; model: string }> {
+  return synthesizeDeepInfraTTS(text, voiceId, KOKORO_MODEL);
 }
 
 class KokoroTTSProvider implements TTSProvider {

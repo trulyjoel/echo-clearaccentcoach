@@ -1,6 +1,6 @@
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
-import { ElevenLabsTTSProvider, synthesizeKokoro } from "../tts.js";
+import { ElevenLabsTTSProvider, synthesizeDeepInfraTTS, synthesizeKokoro } from "../tts.js";
 import { writeAudioToFile } from "./ttsComparisonWriter.js";
 
 /** A representative Kalli reply: warm tone, a corrected-phrase quote (exercises
@@ -11,6 +11,12 @@ const KALLI_TEST_PHRASE =
   "Want to practice that one more time?";
 
 const KOKORO_VOICE_CANDIDATES = ["af_heart", "af_bella", "af_nicole", "af_sky"];
+
+/** Sesame's Conversational Speech Model, also hosted by DeepInfra behind the same
+ * ElevenLabs-compatible endpoint Kokoro uses — trained specifically on multi-turn conversation
+ * rather than narration, unlike Kokoro. "conversational_a" is one of its 7 preset voices. */
+const CSM_MODEL = "sesame/csm-1b";
+const CSM_VOICE = "conversational_a";
 
 async function main(): Promise<void> {
   const outputDir = path.join(import.meta.dirname, "..", "..", "tts-comparison");
@@ -25,6 +31,10 @@ async function main(): Promise<void> {
     await writeAudioToFile(audio, path.join(outputDir, `kokoro-${voiceId}.mp3`));
     console.log(`Wrote kokoro-${voiceId}.mp3 (${model})`);
   }
+
+  const csm = await synthesizeDeepInfraTTS(KALLI_TEST_PHRASE, CSM_VOICE, CSM_MODEL);
+  await writeAudioToFile(csm.audio, path.join(outputDir, `csm-1b-${CSM_VOICE}.mp3`));
+  console.log(`Wrote csm-1b-${CSM_VOICE}.mp3 (${csm.model})`);
 
   console.log(`\nAll candidates written to ${outputDir}`);
 }
