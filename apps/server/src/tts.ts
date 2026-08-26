@@ -64,18 +64,6 @@ function getDeepInfraApiKey(): string {
   return apiKey;
 }
 
-/** Reads a fetch `Response` body stream as an `AsyncIterable<Uint8Array>`. Reading directly from
- * the reader (rather than via `Readable.fromWeb`) keeps chunks as plain `Uint8Array` instead of
- * Node `Buffer` instances, matching the `TTSProvider` interface exactly. */
-async function* streamBody(body: ReadableStream<Uint8Array>): AsyncIterable<Uint8Array> {
-  const reader = body.getReader();
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) return;
-    yield value;
-  }
-}
-
 /** Calls DeepInfra's Kokoro endpoint for a specific voice — factored out so the voice-comparison
  * script (`src/scripts/compareTts.ts`) can request multiple candidate voices without duplicating
  * the request shape. */
@@ -97,7 +85,7 @@ export async function synthesizeKokoro(
   if (!response.ok || !response.body) {
     throw new Error(`DeepInfra TTS request failed: ${response.status} ${await response.text()}`);
   }
-  return { audio: streamBody(response.body), model: KOKORO_MODEL };
+  return { audio: response.body, model: KOKORO_MODEL };
 }
 
 class KokoroTTSProvider implements TTSProvider {
