@@ -1099,7 +1099,7 @@ describe("session limits", () => {
 });
 
 describe("usage metering", () => {
-  it("records LLM token usage and ElevenLabs characters synthesized for a turn", async () => {
+  it("records LLM token usage and TTS characters synthesized for a turn", async () => {
     await giveConsent();
     llmTestState.setAnalyzeUsage({ inputTokens: 20, outputTokens: 4 });
     llmTestState.setReplyUsage({ inputTokens: 30, outputTokens: 12 });
@@ -1136,8 +1136,8 @@ describe("usage metering", () => {
       replyInputTokens: 30,
       replyOutputTokens: 12,
       replyModel: llmTestState.replyModel,
-      elevenlabsCharacters: "Nice job!".length,
-      elevenlabsModel: "eleven_flash_v2_5",
+      ttsCharacters: "Nice job!".length,
+      ttsModel: "eleven_flash_v2_5",
     });
 
     ws.terminate();
@@ -1170,7 +1170,7 @@ describe("usage metering", () => {
       .where(eq(usageRecords.sessionId, sessionId));
     expect(usage?.analysisInputTokens).toBe(16);
     expect(usage?.replyInputTokens).toBe(20);
-    expect(usage?.elevenlabsCharacters).toBe(2 * "Nice job!".length);
+    expect(usage?.ttsCharacters).toBe(2 * "Nice job!".length);
 
     ws.terminate();
     await app.close();

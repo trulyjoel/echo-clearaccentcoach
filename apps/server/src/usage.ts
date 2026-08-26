@@ -5,8 +5,8 @@ import { usageRecords } from "./db/schema.js";
 export interface UsageDelta {
   deepgramSeconds: number;
   deepgramModel: string;
-  elevenlabsCharacters: number;
-  elevenlabsModel: string;
+  ttsCharacters: number;
+  ttsModel: string;
   analysisInputTokens: number;
   analysisOutputTokens: number;
   analysisModel: string;
@@ -17,7 +17,7 @@ export interface UsageDelta {
 
 const ZERO_COUNTS = {
   deepgramSeconds: 0,
-  elevenlabsCharacters: 0,
+  ttsCharacters: 0,
   analysisInputTokens: 0,
   analysisOutputTokens: 0,
   replyInputTokens: 0,
@@ -43,14 +43,14 @@ export async function recordUsage(sessionId: string, delta: Partial<UsageDelta>)
     .update(usageRecords)
     .set({
       deepgramSeconds: sql`${usageRecords.deepgramSeconds} + ${counts.deepgramSeconds}`,
-      elevenlabsCharacters: sql`${usageRecords.elevenlabsCharacters} + ${counts.elevenlabsCharacters}`,
+      ttsCharacters: sql`${usageRecords.ttsCharacters} + ${counts.ttsCharacters}`,
       analysisInputTokens: sql`${usageRecords.analysisInputTokens} + ${counts.analysisInputTokens}`,
       analysisOutputTokens: sql`${usageRecords.analysisOutputTokens} + ${counts.analysisOutputTokens}`,
       replyInputTokens: sql`${usageRecords.replyInputTokens} + ${counts.replyInputTokens}`,
       replyOutputTokens: sql`${usageRecords.replyOutputTokens} + ${counts.replyOutputTokens}`,
       updatedAt: new Date(),
       ...(delta.deepgramModel !== undefined && { deepgramModel: delta.deepgramModel }),
-      ...(delta.elevenlabsModel !== undefined && { elevenlabsModel: delta.elevenlabsModel }),
+      ...(delta.ttsModel !== undefined && { ttsModel: delta.ttsModel }),
       ...(delta.analysisModel !== undefined && { analysisModel: delta.analysisModel }),
       ...(delta.replyModel !== undefined && { replyModel: delta.replyModel }),
     })

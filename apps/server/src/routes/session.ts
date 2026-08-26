@@ -247,8 +247,8 @@ export function registerSessionRoutes(app: FastifyInstance): void {
               // Characters are billed by ElevenLabs as soon as the call is made, regardless of
               // whether the resulting stream is fully consumed.
               await recordUsage(sessionId, {
-                elevenlabsCharacters: sentence.length,
-                elevenlabsModel: ELEVENLABS_MODEL,
+                ttsCharacters: sentence.length,
+                ttsModel: ELEVENLABS_MODEL,
               });
               const audioChunks = await getTTSProvider().synthesize(sentence);
               for await (const chunk of audioChunks) {
