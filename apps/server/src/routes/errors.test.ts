@@ -49,7 +49,7 @@ const ttsTestState = vi.hoisted(() => {
     getTTSProvider: vi.fn(() => ({
       synthesize: async (text: string) => {
         calls.push(text);
-        return defaultChunks();
+        return { audio: defaultChunks(), model: "test-model" };
       },
     })),
   };

@@ -55,8 +55,8 @@ export function registerErrorRoutes(app: FastifyInstance): void {
     const error = await findOwnedError(errorId, userId);
     if (!error) return reply.status(404).send({ error: "Error not found" });
 
-    const chunks = await getTTSProvider().synthesize(error.corrected);
-    return reply.type("audio/mpeg").send(Readable.from(chunks));
+    const { audio } = await getTTSProvider().synthesize(error.corrected);
+    return reply.type("audio/mpeg").send(Readable.from(audio));
   });
 
   // Toggles rather than takes an explicit target state — the review UI only ever needs "flip

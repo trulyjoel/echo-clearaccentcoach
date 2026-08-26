@@ -19,7 +19,7 @@ import type { AnalysisResult, ConversationMessage, TokenUsage } from "../llm.js"
 import { getLLMProvider } from "../llm.js";
 import { getMaxSessionDurationMs, hasReachedDailySessionCap } from "../sessionLimits.js";
 import { splitSentences } from "../sentenceSplitter.js";
-import { ELEVENLABS_MODEL, getTTSProvider } from "../tts.js";
+import { getTTSProvider } from "../tts.js";
 import { ensureUsageRecord, recordUsage } from "../usage.js";
 
 /**
@@ -244,14 +244,11 @@ export function registerSessionRoutes(app: FastifyInstance): void {
           try {
             for await (const sentence of sentenceQueue) {
               if (aborted()) return;
-              // Characters are billed by ElevenLabs as soon as the call is made, regardless of
-              // whether the resulting stream is fully consumed.
-              await recordUsage(sessionId, {
-                ttsCharacters: sentence.length,
-                ttsModel: ELEVENLABS_MODEL,
-              });
-              const audioChunks = await getTTSProvider().synthesize(sentence);
-              for await (const chunk of audioChunks) {
+              const { audio, model } = await getTTSProvider().synthesize(sentence);
+              // Characters are billed by the TTS vendor as soon as the call is made, regardless
+              // of whether the resulting stream is fully consumed.
+              await recordUsage(sessionId, { ttsCharacters: sentence.length, ttsModel: model });
+              for await (const chunk of audio) {
                 if (aborted()) return;
                 socket.send(Buffer.from(chunk));
               }

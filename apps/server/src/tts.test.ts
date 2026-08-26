@@ -58,8 +58,9 @@ describe("ElevenLabsTTSProvider.synthesize", () => {
     process.env["ELEVENLABS_API_KEY"] = "test-key";
     const provider = getTTSProvider();
 
-    await provider.synthesize('Small thing — "I saw a movie."');
+    const { model } = await provider.synthesize('Small thing — "I saw a movie."');
 
     expect(elevenLabsTestState.streamCalls.at(-1)?.text).toBe("Small thing — I saw a movie.");
+    expect(model).toBe("eleven_flash_v2_5");
   });
 });

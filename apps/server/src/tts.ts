@@ -6,8 +6,10 @@ const DEFAULT_VOICE_ID = "21m00Tcm4TlvDq8ikWAM";
 export const ELEVENLABS_MODEL = "eleven_flash_v2_5";
 
 export interface TTSProvider {
-  /** Synthesizes `text` to speech, streamed as audio chunks as they're produced. */
-  synthesize(text: string): Promise<AsyncIterable<Uint8Array>>;
+  /** Synthesizes `text` to speech, streamed as audio chunks as they're produced, alongside the
+   * model that produced it (each provider reports its own — see `llm.ts`'s `LLMProvider` for the
+   * same pattern). */
+  synthesize(text: string): Promise<{ audio: AsyncIterable<Uint8Array>; model: string }>;
 }
 
 /**
@@ -41,12 +43,13 @@ function getClient(): ElevenLabsClient {
 }
 
 class ElevenLabsTTSProvider implements TTSProvider {
-  async synthesize(text: string): Promise<AsyncIterable<Uint8Array>> {
-    return getClient().textToSpeech.stream(getVoiceId(), {
+  async synthesize(text: string): Promise<{ audio: AsyncIterable<Uint8Array>; model: string }> {
+    const audio = await getClient().textToSpeech.stream(getVoiceId(), {
       text: sanitizeForSpeech(text),
       modelId: ELEVENLABS_MODEL,
       outputFormat: "mp3_44100_128",
     });
+    return { audio, model: ELEVENLABS_MODEL };
   }
 }
 

@@ -212,16 +212,21 @@ const ttsTestState = vi.hoisted(() => {
     yield new Uint8Array([4, 5]);
   }
 
-  let synthesizeImpl: (text: string) => Promise<AsyncIterable<Uint8Array>> = async () =>
-    defaultChunks();
+  const MOCK_TTS_MODEL = "mock-tts-model";
+  type SynthesizeResult = { audio: AsyncIterable<Uint8Array>; model: string };
+  let synthesizeImpl: (text: string) => Promise<SynthesizeResult> = async () => ({
+    audio: defaultChunks(),
+    model: MOCK_TTS_MODEL,
+  });
   const calls: string[] = [];
 
   return {
+    model: MOCK_TTS_MODEL,
     reset: (): void => {
-      synthesizeImpl = async () => defaultChunks();
+      synthesizeImpl = async () => ({ audio: defaultChunks(), model: MOCK_TTS_MODEL });
       calls.length = 0;
     },
-    setSynthesizeImpl: (fn: (text: string) => Promise<AsyncIterable<Uint8Array>>): void => {
+    setSynthesizeImpl: (fn: (text: string) => Promise<SynthesizeResult>): void => {
       synthesizeImpl = fn;
     },
     getCalls: (): string[] => calls,
@@ -235,7 +240,6 @@ const ttsTestState = vi.hoisted(() => {
 });
 
 vi.mock("../tts.js", () => ({
-  ELEVENLABS_MODEL: "eleven_flash_v2_5",
   getTTSProvider: ttsTestState.getTTSProvider,
 }));
 
@@ -1137,7 +1141,7 @@ describe("usage metering", () => {
       replyOutputTokens: 12,
       replyModel: llmTestState.replyModel,
       ttsCharacters: "Nice job!".length,
-      ttsModel: "eleven_flash_v2_5",
+      ttsModel: ttsTestState.model,
     });
 
     ws.terminate();
@@ -1350,7 +1354,7 @@ describe("barge-in support", () => {
       await continueSignal;
       yield new Uint8Array([2]);
     }
-    ttsTestState.setSynthesizeImpl(async () => pausableChunks());
+    ttsTestState.setSynthesizeImpl(async () => ({ audio: pausableChunks(), model: ttsTestState.model }));
 
     const app = buildApp();
     await app.ready();
@@ -1395,7 +1399,7 @@ describe("barge-in support", () => {
       await continueSignal;
       yield new Uint8Array([2]);
     }
-    ttsTestState.setSynthesizeImpl(async () => pausableChunks());
+    ttsTestState.setSynthesizeImpl(async () => ({ audio: pausableChunks(), model: ttsTestState.model }));
 
     const app = buildApp();
     await app.ready();
