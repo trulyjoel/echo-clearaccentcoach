@@ -45,7 +45,7 @@ function getClient(): ElevenLabsClient {
   return client;
 }
 
-class ElevenLabsTTSProvider implements TTSProvider {
+export class ElevenLabsTTSProvider implements TTSProvider {
   async synthesize(text: string): Promise<{ audio: AsyncIterable<Uint8Array>; model: string }> {
     const audio = await getClient().textToSpeech.stream(getVoiceId(), {
       text: sanitizeForSpeech(text),

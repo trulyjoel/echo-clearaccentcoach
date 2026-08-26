@@ -7,3 +7,4 @@ dist/
 .DS_Store
 .vercel
 .superpowers/
+apps/server/tts-comparison/
