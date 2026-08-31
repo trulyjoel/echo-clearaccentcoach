@@ -204,7 +204,23 @@ const llmTestState = vi.hoisted(() => {
   };
 });
 
-vi.mock("../llm.js", () => ({ getLLMProvider: llmTestState.getLLMProvider }));
+const greetingTestState = vi.hoisted(() => {
+  let greeting = "Hi, I'm Kalli!";
+  return {
+    reset: (): void => {
+      greeting = "Hi, I'm Kalli!";
+    },
+    setGreeting: (value: string): void => {
+      greeting = value;
+    },
+    pickGreeting: vi.fn(() => greeting),
+  };
+});
+
+vi.mock("../llm.js", () => ({
+  getLLMProvider: llmTestState.getLLMProvider,
+  pickGreeting: greetingTestState.pickGreeting,
+}));
 
 const ttsTestState = vi.hoisted(() => {
   async function* defaultChunks(): AsyncIterable<Uint8Array> {
@@ -230,6 +246,11 @@ const ttsTestState = vi.hoisted(() => {
       synthesizeImpl = fn;
     },
     getCalls: (): string[] => calls,
+    /** Clears recorded calls without touching `synthesizeImpl` — for tests that only want to
+     * ignore the greeting's synthesize call, made before the turn under test even starts. */
+    clearCalls: (): void => {
+      calls.length = 0;
+    },
     getTTSProvider: vi.fn(() => ({
       synthesize: async (text: string) => {
         calls.push(text);
@@ -325,9 +346,46 @@ function mixedQueue(ws: InjectedWebSocket): { next: () => Promise<QueuedFrame> }
   };
 }
 
+/**
+ * Drains the greeting turn's frames, sent automatically right after `session_started` for every
+ * consented session. Every test below that gets past onboarding/session-cap rejection needs this
+ * before asserting on anything else the server sends, since the greeting always runs first. Loops
+ * to `reply_audio_end` rather than assuming a fixed frame count — a synthesis failure sends the
+ * text frames but no audio chunks, which a hardcoded count would misalign on.
+ */
+async function drainGreeting(queue: { next: () => Promise<QueuedFrame> }): Promise<void> {
+  for (;;) {
+    const frame = await queue.next();
+    if (frame.kind === "json" && frame.message.type === "reply_audio_end") return;
+  }
+}
+
+/** Connects, awaits `session_started`, and drains the greeting — the common setup for most tests. */
+async function connectAndGreet(
+  app: FastifyInstance,
+  path = "/api/session",
+  options?: { headers?: Record<string, string> },
+): Promise<{
+  ws: InjectedWebSocket;
+  queue: { next: () => Promise<QueuedFrame> };
+  sessionId: string;
+}> {
+  const ws = await app.injectWS(path, options);
+  const queue = mixedQueue(ws);
+  const started = (await queue.next()) as {
+    kind: "json";
+    message: { type: "session_started"; sessionId: string };
+  };
+  await drainGreeting(queue);
+  return { ws, queue, sessionId: started.message.sessionId };
+}
+
+const AUTH_HEADERS = { headers: { authorization: "Bearer test-user-session-456" } };
+
 afterEach(async () => {
   deepgramTestState.setShouldFail(false);
   llmTestState.reset();
+  greetingTestState.reset();
   ttsTestState.reset();
   storageTestState.reset();
   await db.delete(turnErrors);
@@ -373,10 +431,7 @@ describe("GET /api/session", () => {
     const app = buildApp();
     await app.ready();
 
-    const ws = await app.injectWS("/api/session?token=test-user-session-456");
-    const message = await messageQueue(ws).next();
-
-    expect(message.type).toBe("session_started");
+    const { ws } = await connectAndGreet(app, "/api/session?token=test-user-session-456");
 
     ws.terminate();
     await app.close();
@@ -387,12 +442,7 @@ describe("GET /api/session", () => {
     const app = buildApp();
     await app.ready();
 
-    const ws = await app.injectWS("/api/session", {
-      headers: { authorization: "Bearer test-user-session-456" },
-    });
-    const message = await messageQueue(ws).next();
-
-    expect(message).toEqual({ type: "session_started", sessionId: expect.any(String) });
+    const { ws } = await connectAndGreet(app, "/api/session", AUTH_HEADERS);
 
     const [row] = await db
       .select()
@@ -409,10 +459,7 @@ describe("GET /api/session", () => {
     const app = buildApp();
     await app.ready();
 
-    const ws = await app.injectWS("/api/session", {
-      headers: { authorization: "Bearer test-user-session-456" },
-    });
-    await messageQueue(ws).next(); // session_started
+    const { ws } = await connectAndGreet(app, "/api/session", AUTH_HEADERS);
 
     ws.send(Buffer.from([1, 2, 3]));
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -430,15 +477,14 @@ describe("GET /api/session", () => {
     const app = buildApp();
     await app.ready();
 
-    const ws = await app.injectWS("/api/session", {
-      headers: { authorization: "Bearer test-user-session-456" },
-    });
-    const queue = messageQueue(ws);
-    await queue.next(); // session_started
+    const { ws, queue } = await connectAndGreet(app, "/api/session", AUTH_HEADERS);
 
     emitTurnInfo("Update", "hello there");
 
-    expect(await queue.next()).toEqual({ type: "transcript", text: "hello there", isFinal: false });
+    expect(await queue.next()).toEqual({
+      kind: "json",
+      message: { type: "transcript", text: "hello there", isFinal: false },
+    });
 
     ws.terminate();
     await app.close();
@@ -449,15 +495,14 @@ describe("GET /api/session", () => {
     const app = buildApp();
     await app.ready();
 
-    const ws = await app.injectWS("/api/session", {
-      headers: { authorization: "Bearer test-user-session-456" },
-    });
-    const queue = messageQueue(ws);
-    await queue.next(); // session_started
+    const { ws, queue } = await connectAndGreet(app, "/api/session", AUTH_HEADERS);
 
     emitEndOfTurn("goodbye");
-    expect(await queue.next()).toEqual({ type: "transcript", text: "goodbye", isFinal: true });
-    expect(await queue.next()).toEqual({ type: "end_of_turn" });
+    expect(await queue.next()).toEqual({
+      kind: "json",
+      message: { type: "transcript", text: "goodbye", isFinal: true },
+    });
+    expect(await queue.next()).toEqual({ kind: "json", message: { type: "end_of_turn" } });
 
     ws.terminate();
     await app.close();
@@ -468,14 +513,13 @@ describe("GET /api/session", () => {
     const app = buildApp();
     await app.ready();
 
-    const ws = await app.injectWS("/api/session", {
-      headers: { authorization: "Bearer test-user-session-456" },
-    });
-    const queue = messageQueue(ws);
-    const { sessionId } = (await queue.next()) as { type: "session_started"; sessionId: string };
+    const { ws, queue, sessionId } = await connectAndGreet(app, "/api/session", AUTH_HEADERS);
 
     ws.send(JSON.stringify({ type: "end_session" }));
-    expect(await queue.next()).toEqual({ type: "session_ended", reason: "user_ended" });
+    expect(await queue.next()).toEqual({
+      kind: "json",
+      message: { type: "session_ended", reason: "user_ended" },
+    });
 
     const [row] = await db.select().from(sessions).where(eq(sessions.id, sessionId));
     expect(row?.endedAt).not.toBeNull();
@@ -490,13 +534,7 @@ describe("GET /api/session", () => {
     const app = buildApp();
     await app.ready();
 
-    const ws = await app.injectWS("/api/session", {
-      headers: { authorization: "Bearer test-user-session-456" },
-    });
-    const { sessionId } = (await messageQueue(ws).next()) as {
-      type: "session_started";
-      sessionId: string;
-    };
+    const { ws, sessionId } = await connectAndGreet(app, "/api/session", AUTH_HEADERS);
 
     ws.terminate();
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -513,16 +551,18 @@ describe("GET /api/session", () => {
     const app = buildApp();
     await app.ready();
 
-    const ws = await app.injectWS("/api/session", {
-      headers: { authorization: "Bearer test-user-session-456" },
-    });
-    const queue = messageQueue(ws);
-    const { sessionId } = (await queue.next()) as { type: "session_started"; sessionId: string };
+    const { queue, sessionId } = await connectAndGreet(app, "/api/session", AUTH_HEADERS);
 
     deepgramTestState.getLatest()?.emitError(new Error("stream reset"));
 
-    expect(await queue.next()).toEqual({ type: "error", message: "Transcription error" });
-    expect(await queue.next()).toEqual({ type: "session_ended", reason: "error" });
+    expect(await queue.next()).toEqual({
+      kind: "json",
+      message: { type: "error", message: "Transcription error" },
+    });
+    expect(await queue.next()).toEqual({
+      kind: "json",
+      message: { type: "session_ended", reason: "error" },
+    });
 
     const [row] = await db.select().from(sessions).where(eq(sessions.id, sessionId));
     expect(row?.endedAt).not.toBeNull();
@@ -536,15 +576,14 @@ describe("GET /api/session", () => {
     const app = buildApp();
     await app.ready();
 
-    const ws = await app.injectWS("/api/session", {
-      headers: { authorization: "Bearer test-user-session-456" },
-    });
-    const queue = messageQueue(ws);
-    const { sessionId } = (await queue.next()) as { type: "session_started"; sessionId: string };
+    const { queue, sessionId } = await connectAndGreet(app, "/api/session", AUTH_HEADERS);
 
     deepgramTestState.getLatest()?.emitClose();
 
-    expect(await queue.next()).toEqual({ type: "session_ended", reason: "error" });
+    expect(await queue.next()).toEqual({
+      kind: "json",
+      message: { type: "session_ended", reason: "error" },
+    });
 
     const [row] = await db.select().from(sessions).where(eq(sessions.id, sessionId));
     expect(row?.endReason).toBe("error");
@@ -570,6 +609,109 @@ describe("GET /api/session", () => {
   });
 });
 
+describe("session greeting", () => {
+  it("speaks a greeting before the learner's first turn", async () => {
+    await giveConsent();
+    greetingTestState.setGreeting("Hi, I'm Kalli!");
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    await queue.next(); // session_started (greeting inspected directly below, not drained)
+
+    expect(await queue.next()).toEqual({
+      kind: "json",
+      message: { type: "reply_text_delta", text: "Hi, I'm Kalli!" },
+    });
+    expect(await queue.next()).toEqual({ kind: "binary", data: Buffer.from([1, 2, 3]) });
+    expect(await queue.next()).toEqual({ kind: "binary", data: Buffer.from([4, 5]) });
+    expect(await queue.next()).toEqual({
+      kind: "json",
+      message: { type: "reply_text", text: "Hi, I'm Kalli!" },
+    });
+    expect(await queue.next()).toEqual({ kind: "json", message: { type: "reply_audio_end" } });
+
+    expect(ttsTestState.getCalls()).toEqual(["Hi, I'm Kalli!"]);
+
+    ws.terminate();
+    await app.close();
+  });
+
+  it("does not persist the greeting as a Turn record", async () => {
+    await giveConsent();
+    const app = buildApp();
+    await app.ready();
+
+    const { ws, sessionId } = await connectAndGreet(app, "/api/session", AUTH_HEADERS);
+
+    expect(await db.select().from(turns).where(eq(turns.sessionId, sessionId))).toHaveLength(0);
+
+    ws.terminate();
+    await app.close();
+  });
+
+  it("carries the greeting into conversation history for the first reply", async () => {
+    await giveConsent();
+    greetingTestState.setGreeting("Hi, I'm Kalli!");
+    const app = buildApp();
+    await app.ready();
+
+    const { ws, queue } = await connectAndGreet(app, "/api/session", AUTH_HEADERS);
+
+    emitEndOfTurn("hello Kalli");
+    for (let i = 0; i < 7; i++) await queue.next();
+
+    expect(llmTestState.getCalls()[0]).toEqual([
+      { role: "assistant", content: "Hi, I'm Kalli!" },
+      { role: "user", content: "hello Kalli" },
+    ]);
+
+    ws.terminate();
+    await app.close();
+  });
+
+  it("treats speech starting during the greeting as barge-in", async () => {
+    await giveConsent();
+    let resolveContinue: () => void = () => {};
+    const continueSignal = new Promise<void>((resolve) => {
+      resolveContinue = resolve;
+    });
+    async function* pausableChunks(): AsyncIterable<Uint8Array> {
+      yield new Uint8Array([1]);
+      await continueSignal;
+      yield new Uint8Array([2]);
+    }
+    ttsTestState.setSynthesizeImpl(async () => ({
+      audio: pausableChunks(),
+      model: ttsTestState.model,
+    }));
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    await queue.next(); // session_started (greeting inspected directly below, not drained)
+    await queue.next(); // reply_text_delta (greeting)
+    expect(await queue.next()).toEqual({ kind: "binary", data: Buffer.from([1]) });
+
+    emitStartOfTurn("wait");
+    expect(await queue.next()).toEqual({
+      kind: "json",
+      message: { type: "reply_interrupted", reason: "barge_in" },
+    });
+
+    resolveContinue();
+
+    ws.terminate();
+    await app.close();
+  });
+});
+
 describe("turn-based reply loop", () => {
   it("generates a reply and streams synthesized audio after end_of_turn", async () => {
     await giveConsent();
@@ -581,6 +723,8 @@ describe("turn-based reply loop", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
+    await drainGreeting(queue);
+    ttsTestState.clearCalls();
 
     emitEndOfTurn("hello Kalli");
 
@@ -621,6 +765,7 @@ describe("turn-based reply loop", () => {
       message: { type: "session_started"; sessionId: string };
     };
     const sessionId = started.message.sessionId;
+    await drainGreeting(queue);
 
     emitEndOfTurn("hello Kalli");
     await queue.next(); // transcript
@@ -657,6 +802,7 @@ describe("turn-based reply loop", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
+    await drainGreeting(queue);
 
     emitEndOfTurn("");
 
@@ -683,6 +829,7 @@ describe("turn-based reply loop", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
+    await drainGreeting(queue);
 
     emitEndOfTurn("first turn");
     await drainOneTurn(queue);
@@ -691,6 +838,7 @@ describe("turn-based reply loop", () => {
     await drainOneTurn(queue);
 
     expect(llmTestState.getCalls()[1]).toEqual([
+      { role: "assistant", content: "Hi, I'm Kalli!" },
       { role: "user", content: "first turn" },
       { role: "assistant", content: "Nice job!" },
       { role: "user", content: "second turn" },
@@ -717,6 +865,7 @@ describe("turn-based reply loop", () => {
       message: { type: "session_started"; sessionId: string };
     };
     const sessionId = started.message.sessionId;
+    await drainGreeting(queue);
 
     emitEndOfTurn("hello Kalli");
     await queue.next(); // transcript
@@ -751,6 +900,7 @@ describe("turn-based reply loop", () => {
       message: { type: "session_started"; sessionId: string };
     };
     const sessionId = started.message.sessionId;
+    await drainGreeting(queue);
 
     emitEndOfTurn("hello Kalli");
     await queue.next(); // transcript
@@ -781,6 +931,110 @@ describe("turn-based reply loop", () => {
   });
 });
 
+describe("transcript length limit", () => {
+  it("rejects an oversized transcript without calling the LLM", async () => {
+    await giveConsent();
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    const started = (await queue.next()) as {
+      kind: "json";
+      message: { type: "session_started"; sessionId: string };
+    };
+    const sessionId = started.message.sessionId;
+    await drainGreeting(queue);
+
+    emitEndOfTurn("a".repeat(4001));
+    await queue.next(); // transcript
+    await queue.next(); // end_of_turn
+    expect(await queue.next()).toEqual({
+      kind: "json",
+      message: { type: "error", message: "Transcript too long" },
+    });
+
+    expect(llmTestState.getAnalyzeCalls()).toHaveLength(0);
+    const [row] = await db.select().from(sessions).where(eq(sessions.id, sessionId));
+    expect(row?.endedAt).toBeNull();
+    expect(await db.select().from(turns).where(eq(turns.sessionId, sessionId))).toHaveLength(0);
+
+    ws.terminate();
+    await app.close();
+  });
+
+  it("accepts a transcript at exactly the length limit", async () => {
+    await giveConsent();
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    await queue.next(); // session_started
+    await drainGreeting(queue);
+
+    emitEndOfTurn("a".repeat(4000));
+    await queue.next(); // transcript
+    await queue.next(); // end_of_turn
+    expect(await queue.next()).toEqual({
+      kind: "json",
+      message: { type: "reply_text_delta", text: "Nice job!" },
+    });
+
+    expect(llmTestState.getAnalyzeCalls()).toHaveLength(1);
+
+    // Drain the rest of the pipeline (2 audio chunks, reply_text, reply_audio_end) so no
+    // fire-and-forget work from this test is still in flight once afterEach tears down.
+    await queue.next();
+    await queue.next();
+    await queue.next();
+    await queue.next();
+
+    ws.terminate();
+    await app.close();
+  });
+});
+
+describe("reply output guard", () => {
+  it("blocks a reply containing disallowed content instead of synthesizing or persisting it", async () => {
+    await giveConsent();
+    llmTestState.setReplyImpl(async () => "You should kill yourself right now.");
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    const started = (await queue.next()) as {
+      kind: "json";
+      message: { type: "session_started"; sessionId: string };
+    };
+    const sessionId = started.message.sessionId;
+    await drainGreeting(queue);
+    ttsTestState.clearCalls();
+
+    emitEndOfTurn("hello Kalli");
+    await queue.next(); // transcript
+    await queue.next(); // end_of_turn
+    await queue.next(); // reply_text_delta — already streamed before the sentence check runs
+    expect(await queue.next()).toEqual({
+      kind: "json",
+      message: { type: "error", message: "Could not generate a reply" },
+    });
+
+    expect(ttsTestState.getCalls()).toEqual([]);
+    expect(await db.select().from(turns).where(eq(turns.sessionId, sessionId))).toHaveLength(0);
+
+    ws.terminate();
+    await app.close();
+  });
+});
+
 describe("two-pass correction pipeline", () => {
   const sampleError: DetectedError = {
     category: "subject_verb_agreement",
@@ -800,6 +1054,7 @@ describe("two-pass correction pipeline", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
+    await drainGreeting(queue);
 
     emitEndOfTurn("she go to school");
     await queue.next(); // transcript
@@ -832,6 +1087,7 @@ describe("two-pass correction pipeline", () => {
       message: { type: "session_started"; sessionId: string };
     };
     const sessionId = started.message.sessionId;
+    await drainGreeting(queue);
 
     emitEndOfTurn("she go to school");
     await queue.next(); // transcript
@@ -866,6 +1122,7 @@ describe("two-pass correction pipeline", () => {
       message: { type: "session_started"; sessionId: string };
     };
     const sessionId = started.message.sessionId;
+    await drainGreeting(queue);
 
     emitEndOfTurn("hello Kalli");
     await queue.next(); // transcript
@@ -904,6 +1161,7 @@ describe("two-pass correction pipeline", () => {
       message: { type: "session_started"; sessionId: string };
     };
     const sessionId = started.message.sessionId;
+    await drainGreeting(queue);
 
     emitEndOfTurn("hello Kalli");
     await queue.next(); // transcript
@@ -942,6 +1200,7 @@ describe("correction text panel", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
+    await drainGreeting(queue);
 
     emitEndOfTurn("she go to school");
     await queue.next(); // transcript
@@ -980,6 +1239,7 @@ describe("correction text panel", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
+    await drainGreeting(queue);
 
     emitEndOfTurn("hello Kalli");
     await queue.next(); // transcript
@@ -1015,6 +1275,7 @@ describe("L1-driven interference hints", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
+    await drainGreeting(queue);
 
     emitEndOfTurn("she go to school");
     await drainOneTurn(queue);
@@ -1035,6 +1296,7 @@ describe("L1-driven interference hints", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
+    await drainGreeting(queue);
 
     emitEndOfTurn("she go to school");
     await drainOneTurn(queue);
@@ -1058,10 +1320,7 @@ describe("session limits", () => {
     const app = buildApp();
     await app.ready();
 
-    const ws = await app.injectWS("/api/session", {
-      headers: { authorization: "Bearer test-user-session-456" },
-    });
-    await messageQueue(ws).next(); // session_started
+    const { ws } = await connectAndGreet(app, "/api/session", AUTH_HEADERS);
     ws.terminate();
 
     const ws2 = await app.injectWS("/api/session", {
@@ -1089,10 +1348,23 @@ describe("session limits", () => {
     const ws = await app.injectWS("/api/session", {
       headers: { authorization: "Bearer test-user-session-456" },
     });
-    const queue = messageQueue(ws);
-    const { sessionId } = (await queue.next()) as { type: "session_started"; sessionId: string };
+    const queue = mixedQueue(ws);
+    const started = (await queue.next()) as {
+      kind: "json";
+      message: { type: "session_started"; sessionId: string };
+    };
+    const sessionId = started.message.sessionId;
 
-    expect(await queue.next()).toEqual({ type: "session_ended", reason: "max_duration" });
+    // The greeting races the 30ms max-duration timer — whichever wins, skip past whatever the
+    // greeting managed to send (fully, partially, or not at all) to the session_ended it forces.
+    let frame = await queue.next();
+    while (!(frame.kind === "json" && frame.message.type === "session_ended")) {
+      frame = await queue.next();
+    }
+    expect(frame).toEqual({
+      kind: "json",
+      message: { type: "session_ended", reason: "max_duration" },
+    });
 
     const [row] = await db.select().from(sessions).where(eq(sessions.id, sessionId));
     expect(row?.endReason).toBe("max_duration");
@@ -1119,6 +1391,7 @@ describe("usage metering", () => {
       message: { type: "session_started"; sessionId: string };
     };
     const sessionId = started.message.sessionId;
+    await drainGreeting(queue);
 
     emitEndOfTurn("hello Kalli");
     await queue.next(); // transcript
@@ -1140,7 +1413,8 @@ describe("usage metering", () => {
       replyInputTokens: 30,
       replyOutputTokens: 12,
       replyModel: llmTestState.replyModel,
-      ttsCharacters: "Nice job!".length,
+      // Includes the greeting's synthesize call, made once right after connecting.
+      ttsCharacters: "Hi, I'm Kalli!".length + "Nice job!".length,
       ttsModel: ttsTestState.model,
     });
 
@@ -1162,6 +1436,7 @@ describe("usage metering", () => {
       message: { type: "session_started"; sessionId: string };
     };
     const sessionId = started.message.sessionId;
+    await drainGreeting(queue);
 
     for (let i = 0; i < 2; i++) {
       emitEndOfTurn("hello Kalli");
@@ -1174,7 +1449,8 @@ describe("usage metering", () => {
       .where(eq(usageRecords.sessionId, sessionId));
     expect(usage?.analysisInputTokens).toBe(16);
     expect(usage?.replyInputTokens).toBe(20);
-    expect(usage?.ttsCharacters).toBe(2 * "Nice job!".length);
+    // Includes the greeting's synthesize call, made once right after connecting.
+    expect(usage?.ttsCharacters).toBe("Hi, I'm Kalli!".length + 2 * "Nice job!".length);
 
     ws.terminate();
     await app.close();
@@ -1185,11 +1461,7 @@ describe("usage metering", () => {
     const app = buildApp();
     await app.ready();
 
-    const ws = await app.injectWS("/api/session", {
-      headers: { authorization: "Bearer test-user-session-456" },
-    });
-    const queue = messageQueue(ws);
-    const { sessionId } = (await queue.next()) as { type: "session_started"; sessionId: string };
+    const { ws, queue, sessionId } = await connectAndGreet(app, "/api/session", AUTH_HEADERS);
 
     ws.send(JSON.stringify({ type: "end_session" }));
     await queue.next(); // session_ended
@@ -1228,6 +1500,7 @@ describe("audio clip capture + storage", () => {
       message: { type: "session_started"; sessionId: string };
     };
     const sessionId = started.message.sessionId;
+    await drainGreeting(queue);
 
     ws.send(Buffer.from([1, 2, 3]));
     ws.send(Buffer.from([4, 5]));
@@ -1266,6 +1539,7 @@ describe("audio clip capture + storage", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
+    await drainGreeting(queue);
 
     ws.send(Buffer.from([1, 2, 3]));
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -1296,6 +1570,7 @@ describe("audio clip capture + storage", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
+    await drainGreeting(queue);
 
     // Each turn has a detected error (sampleError), so an extra turn_errors frame is sent too:
     // transcript, end_of_turn, turn_errors, reply_text_delta, 2 audio chunks, reply_text, audio_end.
@@ -1330,6 +1605,12 @@ describe("barge-in support", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
+    await drainGreeting(queue);
+    // The greeting counts as "playing" until the client reports it finished, same as any other
+    // reply — report that here so the assertion below reflects a genuine no-reply-in-progress
+    // state rather than incidentally exercising the greeting's own interruptible window.
+    ws.send(JSON.stringify({ type: "reply_playback_ended" }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
 
     // With no turn in flight, recognized speech is just an ordinary transcript — no
     // reply_interrupted is queued ahead of it.
@@ -1354,7 +1635,6 @@ describe("barge-in support", () => {
       await continueSignal;
       yield new Uint8Array([2]);
     }
-    ttsTestState.setSynthesizeImpl(async () => ({ audio: pausableChunks(), model: ttsTestState.model }));
 
     const app = buildApp();
     await app.ready();
@@ -1364,6 +1644,13 @@ describe("barge-in support", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
+    await drainGreeting(queue);
+    // Installed only after the greeting's own synthesize call, which would otherwise consume
+    // this pausable generator and hang on `continueSignal` before the turn under test even runs.
+    ttsTestState.setSynthesizeImpl(async () => ({
+      audio: pausableChunks(),
+      model: ttsTestState.model,
+    }));
 
     emitEndOfTurn("hello Kalli");
     await queue.next(); // transcript
@@ -1399,7 +1686,6 @@ describe("barge-in support", () => {
       await continueSignal;
       yield new Uint8Array([2]);
     }
-    ttsTestState.setSynthesizeImpl(async () => ({ audio: pausableChunks(), model: ttsTestState.model }));
 
     const app = buildApp();
     await app.ready();
@@ -1413,6 +1699,13 @@ describe("barge-in support", () => {
       message: { type: "session_started"; sessionId: string };
     };
     const sessionId = started.message.sessionId;
+    await drainGreeting(queue);
+    // Installed only after the greeting's own synthesize call, which would otherwise consume
+    // this pausable generator and hang on `continueSignal` before the turn under test even runs.
+    ttsTestState.setSynthesizeImpl(async () => ({
+      audio: pausableChunks(),
+      model: ttsTestState.model,
+    }));
 
     emitEndOfTurn("hello Kalli");
     await queue.next(); // transcript
@@ -1452,6 +1745,7 @@ describe("barge-in support", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
+    await drainGreeting(queue);
 
     emitEndOfTurn("first turn");
     await queue.next(); // transcript
@@ -1509,6 +1803,7 @@ describe("barge-in support", () => {
       message: { type: "session_started"; sessionId: string };
     };
     const sessionId = started.message.sessionId;
+    await drainGreeting(queue);
 
     emitEndOfTurn("first turn");
     await queue.next(); // transcript
@@ -1540,6 +1835,7 @@ describe("barge-in support", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
+    await drainGreeting(queue);
 
     emitEndOfTurn("hello Kalli");
     await queue.next(); // transcript
@@ -1571,6 +1867,7 @@ describe("barge-in support", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
+    await drainGreeting(queue);
 
     emitEndOfTurn("hello Kalli");
     await queue.next(); // transcript

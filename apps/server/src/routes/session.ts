@@ -16,7 +16,8 @@ import { profiles, sessions, turnErrors, turns } from "../db/schema.js";
 import type { DeepgramConnection } from "../deepgram.js";
 import { DEEPGRAM_MODEL, openDeepgramConnection } from "../deepgram.js";
 import type { AnalysisResult, ConversationMessage, TokenUsage } from "../llm.js";
-import { getLLMProvider } from "../llm.js";
+import { getLLMProvider, pickGreeting } from "../llm.js";
+import { containsDisallowedContent } from "../outputGuard.js";
 import { getMaxSessionDurationMs, hasReachedDailySessionCap } from "../sessionLimits.js";
 import { splitSentences } from "../sentenceSplitter.js";
 import { getTTSProvider } from "../tts.js";
@@ -39,6 +40,12 @@ async function requireAuthenticatedUser(
     await reply.code(401).send({ error: "Not authenticated" });
   }
 }
+
+/**
+ * Well beyond any real spoken turn — a defense-in-depth cap in case Flux ever emits a
+ * pathologically long transcript, so a single turn can't balloon LLM cost/latency unbounded.
+ */
+const MAX_TRANSCRIPT_LENGTH = 4000;
 
 interface PersistedTurn {
   id: string;
@@ -263,6 +270,14 @@ export function registerSessionRoutes(app: FastifyInstance): void {
         // `waitForAudio`, not here, so a slow/interrupted audio side never delays the text side.
         const audioTask = consumeAudio();
 
+        // Set as soon as a completed sentence trips the output denylist — checked at sentence
+        // granularity (the same unit already handed to TTS) rather than per-delta, since a
+        // denylisted phrase can span multiple deltas. Sentences queued before the hit have
+        // already passed the check and are left to finish playing; the flagged sentence and
+        // everything after it is dropped instead of being queued for synthesis. Deltas for the
+        // flagged sentence's own text have already been sent to the client as captions by the
+        // time its sentence boundary is detected — only the audio side is guarded here.
+        let blocked = false;
         try {
           for await (const delta of replyStream.textStream) {
             if (aborted()) break;
@@ -270,10 +285,20 @@ export function registerSessionRoutes(app: FastifyInstance): void {
             send({ type: "reply_text_delta", text: delta });
             const { sentences, remainder } = splitSentences(sentenceBuffer + delta);
             sentenceBuffer = remainder;
-            for (const sentence of sentences) sentenceQueue.push(sentence);
+            for (const sentence of sentences) {
+              if (containsDisallowedContent(sentence)) {
+                blocked = true;
+                break;
+              }
+              sentenceQueue.push(sentence);
+            }
+            if (blocked) break;
           }
           const finalSentence = sentenceBuffer.trim();
-          if (finalSentence && !aborted()) sentenceQueue.push(finalSentence);
+          if (!blocked && finalSentence && !aborted()) {
+            if (containsDisallowedContent(finalSentence)) blocked = true;
+            else sentenceQueue.push(finalSentence);
+          }
         } catch (error) {
           request.log.error(error, "Failed to generate reply");
           sentenceQueue.close();
@@ -281,6 +306,11 @@ export function registerSessionRoutes(app: FastifyInstance): void {
           return { textFailed: true };
         }
         sentenceQueue.close();
+        if (blocked) {
+          request.log.warn("Blocked a generated reply containing disallowed content");
+          await audioTask;
+          return { textFailed: true };
+        }
 
         let usage: TokenUsage = { inputTokens: 0, outputTokens: 0 };
         try {
@@ -322,6 +352,10 @@ export function registerSessionRoutes(app: FastifyInstance): void {
         // own completion.
         let pendingAudio: (() => Promise<{ audioFailed: boolean }>) | undefined;
         try {
+          if (transcript.length > MAX_TRANSCRIPT_LENGTH) {
+            if (!ended) send({ type: "error", message: "Transcript too long" });
+            return;
+          }
           conversationHistory.push({ role: "user", content: transcript });
 
           let analysis: AnalysisResult;
@@ -399,6 +433,49 @@ export function registerSessionRoutes(app: FastifyInstance): void {
         }
       }
 
+      /**
+       * Speaks Kalli's opening line before the learner's first turn, through the same
+       * text/audio pipeline a normal reply uses (so barge-in, usage metering, etc. all behave
+       * identically) — but it's not a `handleTurn` call: there's no transcript, no error
+       * analysis, and it's never persisted as a `turns` row, since it isn't really a turn.
+       */
+      async function sendGreeting(): Promise<void> {
+        if (activeTurn) return;
+        const myTurn: ActiveTurn = { interrupted: false };
+        activeTurn = myTurn;
+        const aborted = (): boolean => ended || myTurn.interrupted;
+        try {
+          const greeting = pickGreeting();
+          send({ type: "reply_text_delta", text: greeting });
+          const { sentences, remainder } = splitSentences(greeting);
+          const finalSentence = remainder.trim();
+          const allSentences = finalSentence ? [...sentences, finalSentence] : sentences;
+          for (const sentence of allSentences) {
+            if (aborted()) return;
+            try {
+              const { audio, model } = await getTTSProvider().synthesize(sentence);
+              await recordUsage(sessionId, { ttsCharacters: sentence.length, ttsModel: model });
+              for await (const chunk of audio) {
+                if (aborted()) return;
+                socket.send(Buffer.from(chunk));
+              }
+            } catch (error) {
+              request.log.error(error, "Failed to synthesize greeting audio");
+              break;
+            }
+          }
+          if (aborted()) return;
+          conversationHistory.push({ role: "assistant", content: greeting });
+          send({ type: "reply_text", text: greeting });
+          if (!aborted()) {
+            replyPlaying = true;
+            send({ type: "reply_audio_end" });
+          }
+        } finally {
+          if (activeTurn === myTurn) activeTurn = null;
+        }
+      }
+
       try {
         deepgramConnection = await openDeepgramConnection();
       } catch (error) {
@@ -453,6 +530,8 @@ export function registerSessionRoutes(app: FastifyInstance): void {
       deepgramConnection.on("close", () => {
         void endSession("error");
       });
+
+      void sendGreeting();
 
       handleSocketMessage = (message: Buffer, isBinary: boolean) => {
         if (isBinary) {
