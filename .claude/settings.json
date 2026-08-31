@@ -1,0 +1,27 @@
+{
+  "worktree": {
+    "baseRef": "head"
+  },
+  "permissions": {
+    "allow": [
+      "Bash(npx vitest run *)",
+      "Bash(npx tsc --noEmit *)",
+      "Bash(pnpm exec vitest run *)",
+      "Bash(pnpm vitest run *)",
+      "Bash(npx oxlint *)",
+      "Bash(pnpm lint *)",
+      "Bash(pnpm typecheck *)",
+      "Bash(pnpm test *)",
+      "Bash(pnpm format:check *)",
+      "Bash(pnpm -r test *)",
+      "Bash(npx oxfmt --check *)",
+      "Bash(pnpm -r typecheck *)",
+      "mcp__exa__web_search_exa",
+      "Bash(pnpm oxlint *)",
+      "Bash(npm view *)",
+      "Bash(pnpm run lint *)",
+      "Bash(pnpm --filter server test *)",
+      "Bash(pnpm --filter web test *)"
+    ]
+  }
+}
