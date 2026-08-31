@@ -56,7 +56,7 @@ export class ElevenLabsTTSProvider implements TTSProvider {
   }
 }
 
-function getDeepInfraApiKey(): string {
+export function getDeepInfraApiKey(): string {
   const apiKey = process.env["DEEPINFRA_API_KEY"];
   if (!apiKey) {
     throw new Error("DEEPINFRA_API_KEY is required (see apps/server/.env.example)");
@@ -73,16 +73,24 @@ export async function synthesizeDeepInfraTTS(
   text: string,
   voiceId: string,
   modelId: string,
+  outputFormat: "mp3" | "wav" = "mp3",
 ): Promise<{ audio: AsyncIterable<Uint8Array>; model: string }> {
   const response = await fetch(
-    `https://api.deepinfra.com/v1/text-to-speech/${voiceId}/stream?output_format=mp3`,
+    `https://api.deepinfra.com/v1/text-to-speech/${voiceId}/stream?output_format=${outputFormat}`,
     {
       method: "POST",
       headers: {
         "xi-api-key": getDeepInfraApiKey(),
         "content-type": "application/json",
       },
-      body: JSON.stringify({ text: sanitizeForSpeech(text), model_id: modelId }),
+      // output_format must be repeated here — the query param above is silently ignored by
+      // DeepInfra's stream endpoint, which otherwise falls back to its body-schema default
+      // ("wav") regardless of what's requested in the URL.
+      body: JSON.stringify({
+        text: sanitizeForSpeech(text),
+        model_id: modelId,
+        output_format: outputFormat,
+      }),
     },
   );
   if (!response.ok || !response.body) {
@@ -95,7 +103,10 @@ export function synthesizeKokoro(
   text: string,
   voiceId: string,
 ): Promise<{ audio: AsyncIterable<Uint8Array>; model: string }> {
-  return synthesizeDeepInfraTTS(text, voiceId, KOKORO_MODEL);
+  // "mp3" passed explicitly (matching the default) rather than omitted — this call must always
+  // request mp3 to match the browser's hardcoded `audio/mpeg` MediaSource buffer, so it's spelled
+  // out here instead of relying on a default that a future signature change could alter unnoticed.
+  return synthesizeDeepInfraTTS(text, voiceId, KOKORO_MODEL, "mp3");
 }
 
 class KokoroTTSProvider implements TTSProvider {

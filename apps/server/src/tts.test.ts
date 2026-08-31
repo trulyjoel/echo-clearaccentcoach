@@ -15,7 +15,8 @@ vi.mock("@elevenlabs/elevenlabs-js", () => ({
   },
 }));
 
-const { getTTSProvider, sanitizeForSpeech, synthesizeKokoro } = await import("./tts.js");
+const { getTTSProvider, sanitizeForSpeech, synthesizeDeepInfraTTS, synthesizeKokoro } =
+  await import("./tts.js");
 
 /** Wraps bytes as a fetch `Response` whose `.body` streams them — mirrors the shape DeepInfra's
  * real streaming endpoint returns. */
@@ -104,9 +105,13 @@ describe("synthesizeKokoro", () => {
       "https://api.deepinfra.com/v1/text-to-speech/af_bella/stream?output_format=mp3",
     );
     expect(capturedInit?.headers).toMatchObject({ "xi-api-key": "test-deepinfra-key" });
+    // output_format must travel in the body, not just the query string — DeepInfra's stream
+    // endpoint silently ignores the query param and falls back to its body-schema default
+    // ("wav") otherwise, which is what broke Kokoro playback in the browser (it expects mp3).
     expect(JSON.parse(capturedInit?.body as string)).toEqual({
       text: "Nice — great job.",
       model_id: "hexgrad/Kokoro-82M",
+      output_format: "mp3",
     });
     expect(model).toBe("hexgrad/Kokoro-82M");
     expect(chunks).toEqual([new Uint8Array([9, 9])]);
@@ -114,6 +119,36 @@ describe("synthesizeKokoro", () => {
 
   it("throws when DEEPINFRA_API_KEY is unset", async () => {
     await expect(synthesizeKokoro("hi", "af_heart")).rejects.toThrow("DEEPINFRA_API_KEY");
+  });
+});
+
+describe("synthesizeDeepInfraTTS", () => {
+  const originalFetch = global.fetch;
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+    delete process.env["DEEPINFRA_API_KEY"];
+  });
+
+  // Regression test: DeepInfra's stream endpoint was found to ignore the output_format query
+  // param entirely and always return wav (its body-schema default) — requesting a format only
+  // takes effect when it's also sent in the JSON body.
+  it("requests the given output format in both the query string and the body", async () => {
+    process.env["DEEPINFRA_API_KEY"] = "test-key";
+    let capturedUrl = "";
+    let capturedInit: RequestInit | undefined;
+    global.fetch = vi.fn(async (url: string | URL, init?: RequestInit) => {
+      capturedUrl = url.toString();
+      capturedInit = init;
+      return fetchResponseFromChunks([new Uint8Array([1])]);
+    }) as unknown as typeof fetch;
+
+    await synthesizeDeepInfraTTS("hi", "conversational_a", "sesame/csm-1b", "wav");
+
+    expect(capturedUrl).toBe(
+      "https://api.deepinfra.com/v1/text-to-speech/conversational_a/stream?output_format=wav",
+    );
+    expect(JSON.parse(capturedInit?.body as string)).toMatchObject({ output_format: "wav" });
   });
 });
 
