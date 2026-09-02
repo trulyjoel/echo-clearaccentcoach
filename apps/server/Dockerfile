@@ -14,6 +14,9 @@ COPY apps/server apps/server
 RUN pnpm --filter @kalli/server build
 
 FROM base AS runtime
+# ffmpeg transcodes Chatterbox-turbo's WAV output to mp3 for the browser (see apps/server/src/tts.ts).
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
 ENV NODE_ENV=production
 COPY --from=build /app/apps/server/dist ./apps/server/dist
 COPY --from=build /app/apps/server/package.json ./apps/server/package.json

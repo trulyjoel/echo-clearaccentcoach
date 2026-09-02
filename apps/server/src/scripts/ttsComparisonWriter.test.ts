@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { decodeDataUriAudio, writeAudioToFile } from "./ttsComparisonWriter.js";
+import { writeAudioToFile } from "./ttsComparisonWriter.js";
 
 describe("writeAudioToFile", () => {
   let dir = "";
@@ -22,18 +22,5 @@ describe("writeAudioToFile", () => {
     await writeAudioToFile(chunks(), filePath);
 
     expect(await readFile(filePath)).toEqual(Buffer.from([1, 2, 3, 4, 5]));
-  });
-});
-
-describe("decodeDataUriAudio", () => {
-  it("decodes the base64 payload of a data URI", () => {
-    const bytes = Buffer.from([1, 2, 3, 4, 5]);
-    const dataUri = `data:audio/wav;base64,${bytes.toString("base64")}`;
-
-    expect(decodeDataUriAudio(dataUri)).toEqual(bytes);
-  });
-
-  it("throws a clear error when given a string that isn't a data URI", () => {
-    expect(() => decodeDataUriAudio("not a data uri")).toThrow("data URI");
   });
 });
