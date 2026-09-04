@@ -82,7 +82,9 @@ function confirmationLine(state: OnboardingState): string {
     const letters = state.pendingValue.split("").join(", ");
     return `Got it — ${letters}. Is that right?`;
   }
-  if (state.field === "l1") return `Got it, ${state.pendingL1 ?? "that"} — is that right?`;
+  if (state.field === "l1") {
+    return `Got it, ${state.pendingValue ?? state.pendingL1 ?? "that"} — is that right?`;
+  }
   if (state.field === "proficiency") {
     return `Got it, ${state.pendingProficiency ?? "that"} — is that right?`;
   }

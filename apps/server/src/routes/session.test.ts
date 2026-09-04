@@ -102,6 +102,7 @@ vi.mock("../deepgram.js", () => ({
 }));
 
 const onboardingExtractTestState = vi.hoisted(() => {
+  const DEFAULT_USAGE = { inputTokens: 1, outputTokens: 1 };
   type AnswerImpl = (
     field: string,
     transcript: string,
@@ -111,21 +112,31 @@ const onboardingExtractTestState = vi.hoisted(() => {
     l1: string | null;
     proficiency: string | null;
     confident: boolean;
+    usage: { inputTokens: number; outputTokens: number };
   }>;
-  type ConfirmationImpl = (transcript: string) => Promise<{ confirmed: boolean }>;
+  type ConfirmationImpl = (
+    transcript: string,
+  ) => Promise<{ confirmed: boolean; usage: { inputTokens: number; outputTokens: number } }>;
 
   let answerImpl: AnswerImpl = async () => ({
     value: null,
     l1: null,
     proficiency: null,
     confident: false,
+    usage: DEFAULT_USAGE,
   });
-  let confirmationImpl: ConfirmationImpl = async () => ({ confirmed: true });
+  let confirmationImpl: ConfirmationImpl = async () => ({ confirmed: true, usage: DEFAULT_USAGE });
 
   return {
     reset: (): void => {
-      answerImpl = async () => ({ value: null, l1: null, proficiency: null, confident: false });
-      confirmationImpl = async () => ({ confirmed: true });
+      answerImpl = async () => ({
+        value: null,
+        l1: null,
+        proficiency: null,
+        confident: false,
+        usage: DEFAULT_USAGE,
+      });
+      confirmationImpl = async () => ({ confirmed: true, usage: DEFAULT_USAGE });
     },
     setAnswerImpl: (impl: AnswerImpl): void => {
       answerImpl = impl;
@@ -266,6 +277,7 @@ vi.mock("../llm.js", () => ({
   getLLMProvider: llmTestState.getLLMProvider,
   pickGreeting: greetingTestState.pickGreeting,
   buildReplySystemPrompt: vi.fn(() => "mock system prompt"),
+  getAnalysisModelId: vi.fn(() => llmTestState.analysisModel),
 }));
 
 const ttsTestState = vi.hoisted(() => {
@@ -338,6 +350,7 @@ vi.mock("../storage.js", () => ({ getStorageProvider: storageTestState.getStorag
 
 // vitest hoists imports above vi.mock calls, so app.js must be imported after the mocks above are set up.
 const { buildApp } = await import("../app.js");
+const { buildReplySystemPrompt } = await import("../llm.js");
 
 async function giveConsent(l1: L1 = "spanish"): Promise<void> {
   await db.insert(profiles).values({
@@ -702,6 +715,7 @@ describe("session greeting", () => {
     expect(await queue.next()).toEqual({ kind: "json", message: { type: "reply_audio_end" } });
 
     expect(ttsTestState.getCalls()).toEqual(["Hi, I'm Kalli!"]);
+    expect(greetingTestState.pickGreeting).toHaveBeenCalledWith("Test User");
 
     ws.terminate();
     await app.close();
@@ -2109,11 +2123,18 @@ describe("onboarding mode", () => {
 
   it("walks through every field, persists the profile, and switches to coaching mode", async () => {
     await giveConsentOnly();
+    const usage = { inputTokens: 1, outputTokens: 1 };
     onboardingExtractTestState.setAnswerImpl(async (field) => {
       if (field === "l1")
-        return { value: "Spanish", l1: "spanish", proficiency: null, confident: true };
+        return { value: "Spanish", l1: "spanish", proficiency: null, confident: true, usage };
       if (field === "proficiency") {
-        return { value: "intermediate", l1: null, proficiency: "intermediate", confident: true };
+        return {
+          value: "intermediate",
+          l1: null,
+          proficiency: "intermediate",
+          confident: true,
+          usage,
+        };
       }
       const value =
         field === "name"
@@ -2121,7 +2142,7 @@ describe("onboarding mode", () => {
           : field === "context"
             ? "work meetings"
             : "sounding more natural";
-      return { value, l1: null, proficiency: null, confident: true };
+      return { value, l1: null, proficiency: null, confident: true, usage };
     });
     const app = buildApp();
     await app.ready();
@@ -2168,17 +2189,31 @@ describe("onboarding mode", () => {
     await drainSpokenLine(queue);
     expect(llmTestState.getCalls().length).toBe(callsBefore + 1);
 
+    expect(buildReplySystemPrompt).toHaveBeenCalledWith({
+      name: "Maria",
+      proficiency: "intermediate",
+      context: "work meetings",
+      goals: "sounding more natural",
+    });
+
     ws.terminate();
     await app.close();
   });
 
   it("sends profile_updated once onboarding completes", async () => {
     await giveConsentOnly();
+    const usage = { inputTokens: 1, outputTokens: 1 };
     onboardingExtractTestState.setAnswerImpl(async (field) => {
       if (field === "l1")
-        return { value: "Spanish", l1: "spanish", proficiency: null, confident: true };
+        return { value: "Spanish", l1: "spanish", proficiency: null, confident: true, usage };
       if (field === "proficiency") {
-        return { value: "intermediate", l1: null, proficiency: "intermediate", confident: true };
+        return {
+          value: "intermediate",
+          l1: null,
+          proficiency: "intermediate",
+          confident: true,
+          usage,
+        };
       }
       const value =
         field === "name"
@@ -2186,7 +2221,7 @@ describe("onboarding mode", () => {
           : field === "context"
             ? "work meetings"
             : "sounding more natural";
-      return { value, l1: null, proficiency: null, confident: true };
+      return { value, l1: null, proficiency: null, confident: true, usage };
     });
     const app = buildApp();
     await app.ready();

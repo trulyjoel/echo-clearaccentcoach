@@ -36,7 +36,13 @@ describe("extractOnboardingAnswer", () => {
 
     const result = await extractOnboardingAnswer("name", "You can call me Maria");
 
-    expect(result).toEqual({ value: "Maria", l1: null, proficiency: null, confident: true });
+    expect(result).toEqual({
+      value: "Maria",
+      l1: null,
+      proficiency: null,
+      confident: true,
+      usage: { inputTokens: 1, outputTokens: 1 },
+    });
     expect(aiTestState.calls[0]?.prompt).toBe("You can call me Maria");
   });
 
@@ -112,7 +118,7 @@ describe("extractOnboardingConfirmation", () => {
 
     const result = await extractOnboardingConfirmation("yep, that's right");
 
-    expect(result).toEqual({ confirmed: true });
+    expect(result).toEqual({ confirmed: true, usage: { inputTokens: 1, outputTokens: 1 } });
     expect(aiTestState.calls[0]?.prompt).toBe("yep, that's right");
   });
 
@@ -122,6 +128,6 @@ describe("extractOnboardingConfirmation", () => {
 
     const result = await extractOnboardingConfirmation("no, that's not it");
 
-    expect(result).toEqual({ confirmed: false });
+    expect(result).toEqual({ confirmed: false, usage: { inputTokens: 1, outputTokens: 1 } });
   });
 });

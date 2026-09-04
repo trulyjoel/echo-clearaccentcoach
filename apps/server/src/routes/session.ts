@@ -18,7 +18,7 @@ import type { DeepgramConnection } from "../deepgram.js";
 import { DEEPGRAM_MODEL, openDeepgramConnection } from "../deepgram.js";
 import { createMarkerResolver } from "../emphasisMarkers.js";
 import type { AnalysisResult, ConversationMessage, TokenUsage } from "../llm.js";
-import { buildReplySystemPrompt, getLLMProvider, pickGreeting } from "../llm.js";
+import { buildReplySystemPrompt, getAnalysisModelId, getLLMProvider, pickGreeting } from "../llm.js";
 import { extractOnboardingAnswer, extractOnboardingConfirmation } from "../onboarding/extract.js";
 import type { OnboardingResult, OnboardingState } from "../onboarding/flow.js";
 import { startOnboarding, submitAnswer, submitConfirmation } from "../onboarding/flow.js";
@@ -51,6 +51,13 @@ async function requireAuthenticatedUser(
  * pathologically long transcript, so a single turn can't balloon LLM cost/latency unbounded.
  */
 const MAX_TRANSCRIPT_LENGTH = 4000;
+
+/**
+ * Learner-supplied onboarding fields (name, context, goals) are interpolated into the reply
+ * system prompt with no other bound — this caps them before they're persisted or used to build
+ * that prompt.
+ */
+const MAX_PROFILE_FIELD_LENGTH = 200;
 
 interface CompleteProfile {
   name: string;
@@ -299,6 +306,7 @@ export function registerSessionRoutes(app: FastifyInstance): void {
         aborted: () => boolean,
         recordHistory = true,
       ): Promise<void> {
+        if (containsDisallowedContent(text)) return;
         send({ type: "reply_text_delta", text });
         const { sentences, remainder } = splitSentences(text);
         const finalSentence = remainder.trim();
@@ -630,11 +638,21 @@ export function registerSessionRoutes(app: FastifyInstance): void {
                 spelling: state.spelling,
               });
               if (aborted()) return;
+              await recordUsage(sessionId, {
+                analysisInputTokens: extraction.usage.inputTokens,
+                analysisOutputTokens: extraction.usage.outputTokens,
+                analysisModel: getAnalysisModelId(),
+              });
               result = submitAnswer(state, extraction);
             } else {
-              const { confirmed } = await extractOnboardingConfirmation(transcript);
+              const confirmation = await extractOnboardingConfirmation(transcript);
               if (aborted()) return;
-              result = submitConfirmation(state, confirmed);
+              await recordUsage(sessionId, {
+                analysisInputTokens: confirmation.usage.inputTokens,
+                analysisOutputTokens: confirmation.usage.outputTokens,
+                analysisModel: getAnalysisModelId(),
+              });
+              result = submitConfirmation(state, confirmation.confirmed);
             }
           } catch (error) {
             request.log.error(error, "Failed to extract onboarding answer");
@@ -649,10 +667,19 @@ export function registerSessionRoutes(app: FastifyInstance): void {
           }
 
           const { name, l1: collectedL1, proficiency, context, goals } = result.profile;
+          const truncatedName = name.slice(0, MAX_PROFILE_FIELD_LENGTH);
+          const truncatedContext = context.slice(0, MAX_PROFILE_FIELD_LENGTH);
+          const truncatedGoals = goals.slice(0, MAX_PROFILE_FIELD_LENGTH);
           try {
             await db
               .update(profiles)
-              .set({ name, l1: collectedL1, proficiency, context, goals })
+              .set({
+                name: truncatedName,
+                l1: collectedL1,
+                proficiency,
+                context: truncatedContext,
+                goals: truncatedGoals,
+              })
               .where(eq(profiles.clerkUserId, userId));
           } catch (error) {
             request.log.error(error, "Failed to persist onboarding profile");
@@ -661,9 +688,21 @@ export function registerSessionRoutes(app: FastifyInstance): void {
           }
           onboardingFlowState = null;
           l1 = collectedL1;
-          replySystemPrompt = buildReplySystemPrompt({ name, proficiency, context, goals });
-          send({ type: "profile_updated", name, l1: collectedL1, proficiency, context, goals });
-          await speakLine(`Great, ${name} — let's get started!`, aborted);
+          replySystemPrompt = buildReplySystemPrompt({
+            name: truncatedName,
+            proficiency,
+            context: truncatedContext,
+            goals: truncatedGoals,
+          });
+          send({
+            type: "profile_updated",
+            name: truncatedName,
+            l1: collectedL1,
+            proficiency,
+            context: truncatedContext,
+            goals: truncatedGoals,
+          });
+          await speakLine(`Great, ${truncatedName} — let's get started!`, aborted);
         });
       }
 

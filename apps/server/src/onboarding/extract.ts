@@ -1,7 +1,7 @@
-import type { L1, ProficiencyLevel } from "@kalli/types";
 import { L1_VALUES, PROFICIENCY_LEVELS } from "@kalli/types";
 import { generateObject } from "ai";
 import { z } from "zod";
+import type { TokenUsage } from "../llm.js";
 import { getAnalysisModelId, getClient } from "../llm.js";
 
 export type OnboardingField = "name" | "l1" | "proficiency" | "context" | "goals";
@@ -58,21 +58,28 @@ const EXTRACTION_SCHEMA = z.object({
 
 export type OnboardingExtraction = z.infer<typeof EXTRACTION_SCHEMA>;
 
+function toTokenUsage(usage: {
+  inputTokens: number | undefined;
+  outputTokens: number | undefined;
+}): TokenUsage {
+  return { inputTokens: usage.inputTokens ?? 0, outputTokens: usage.outputTokens ?? 0 };
+}
+
 /** Extracts structured data for one onboarding field from a turn's transcript. `spelling` routes
  * the prompt through the letter-by-letter reconstruction mode — only meaningful for `"name"`. */
 export async function extractOnboardingAnswer(
   field: OnboardingField,
   transcript: string,
   options: { spelling?: boolean } = {},
-): Promise<OnboardingExtraction> {
-  const { object } = await generateObject({
+): Promise<OnboardingExtraction & { usage: TokenUsage }> {
+  const { object, usage } = await generateObject({
     model: getClient()(getAnalysisModelId()),
     schema: EXTRACTION_SCHEMA,
     system: buildExtractionPrompt(field, options.spelling ?? false),
     prompt: transcript,
     maxOutputTokens: 256,
   });
-  return object;
+  return { ...object, usage: toTokenUsage(usage) };
 }
 
 const CONFIRMATION_SCHEMA = z.object({ confirmed: z.boolean() });
@@ -90,13 +97,13 @@ const CONFIRMATION_SYSTEM_PROMPT =
  * learner. */
 export async function extractOnboardingConfirmation(
   transcript: string,
-): Promise<OnboardingConfirmation> {
-  const { object } = await generateObject({
+): Promise<OnboardingConfirmation & { usage: TokenUsage }> {
+  const { object, usage } = await generateObject({
     model: getClient()(getAnalysisModelId()),
     schema: CONFIRMATION_SCHEMA,
     system: CONFIRMATION_SYSTEM_PROMPT,
     prompt: transcript,
     maxOutputTokens: 64,
   });
-  return object;
+  return { ...object, usage: toTokenUsage(usage) };
 }
