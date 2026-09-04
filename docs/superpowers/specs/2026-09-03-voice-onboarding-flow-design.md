@@ -9,14 +9,17 @@ session opens with a generic greeting and a one-size-fits-all coaching persona.
 
 ## Goals
 
-- Collect three things before a learner's first real coaching turn: what they want to be called
-  (`name`), their native language (`l1` — already exists, just moves where it's collected), and
-  what they want to work on (`goals`, free text).
+- Collect four things before a learner's first real coaching turn: what they want to be called
+  (`name`), their native language (`l1` — already exists, just moves where it's collected), a
+  self-rated proficiency level (`proficiency`), and what they want to work on (`goals`, free text).
 - Collect them by voice, through the same STT → LLM → TTS pipeline that runs regular coaching turns
   (`apps/server/src/routes/session.ts`), not a second form or a separate lightweight voice
   mechanism.
-- Persist all three to `profiles` and use `name`/`goals` to personalize the reply system prompt and
-  (for `name`) the returning-user greeting.
+- Ask `proficiency` right before `goals` and have the goals question reference it — a cold "what do
+  you want to work on" is a hard open-ended question to answer; grounding it in the learner's own
+  just-given proficiency answer gives them an easier on-ramp.
+- Persist all four to `profiles` and use `name`/`goals`/`proficiency` to personalize the reply
+  system prompt and (for `name`) the returning-user greeting.
 - Degrade gracefully when speech-to-text or extraction doesn't produce a confident answer, without
   looping indefinitely.
 
@@ -24,34 +27,45 @@ session opens with a generic greeting and a one-size-fits-all coaching persona.
 
 - No generic reusable "flow" or state-machine abstraction. This is the first multi-step flow in the
   codebase; building one abstraction from a single use case would be speculative. The onboarding
-  state machine described below is purpose-built for these three fields.
+  state machine described below is purpose-built for these four fields.
 - No structured taxonomy for `goals`. It's stored as an LLM-summarized free-text string, not mapped
   onto the existing `ERROR_CATEGORIES` enum — that enum is pass-1's error taxonomy, a different
   concern, and forcing spoken goals into it would lose information for no current benefit.
-- No editing an already-set profile via voice. Once `name`/`l1`/`goals` are all set, a session goes
+- No editing an already-set profile via voice. Once all four fields are set, a session goes
   straight to coaching mode; changing them later (if ever needed) is a separate feature.
+- `proficiency` doesn't feed pass 1 (`analyzeErrors`) — only the reply prompt. Scaling how many
+  errors get flagged per level, not just how they're phrased, is a plausible follow-up but isn't
+  what was asked for here.
 - No changes to how consent itself is gated or recorded — only the L1 field moves out of the
   consent form.
 
 ## Data model
 
-`apps/server/src/db/schema.ts`: `profiles` gains two nullable columns:
+`packages/types/src/index.ts` gains a proficiency scale, the same pattern as `SUPPORTED_L1S`:
 
 ```ts
+export const PROFICIENCY_LEVELS = ["beginner", "intermediate", "advanced"] as const;
+export type ProficiencyLevel = (typeof PROFICIENCY_LEVELS)[number];
+```
+
+`apps/server/src/db/schema.ts`: `profiles` gains three nullable columns:
+
+```ts
+export const proficiencyEnum = pgEnum("proficiency", [...PROFICIENCY_LEVELS]);
+
 export const profiles = pgTable("profiles", {
   clerkUserId: text("clerk_user_id").primaryKey(),
   name: text("name"),
   l1: l1Enum("l1"),
+  proficiency: proficiencyEnum("proficiency"),
   goals: text("goals"),
   consentGivenAt: timestamp("consent_given_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 ```
 
-New drizzle migration. Both columns nullable — existing rows already have `null` for both, and a
-row is "profile complete" exactly when all three of `name`, `l1`, `goals` are non-null.
-
-`packages/types/src/index.ts`:
+New drizzle migration. All three nullable — existing rows already have `null` for all of them, and
+a row is "profile complete" exactly when `name`, `l1`, `proficiency`, and `goals` are all non-null.
 
 ```ts
 export interface OnboardingRequest {
@@ -62,6 +76,7 @@ export interface OnboardingStatusResponse {
   consentGivenAt: string | null;
   name: string | null;
   l1: L1 | null;
+  proficiency: ProficiencyLevel | null;
   goals: string | null;
 }
 ```
@@ -72,8 +87,8 @@ export interface OnboardingStatusResponse {
 
 `apps/server/src/routes/onboarding.ts`: `POST /api/onboarding` drops the `isL1` check, only
 requires `consent === true`, and no longer writes `l1`. `GET /api/onboarding` returns the full
-`OnboardingStatusResponse` shape above (reading `name`/`l1`/`goals` straight off the `profiles`
-row).
+`OnboardingStatusResponse` shape above (reading `name`/`l1`/`proficiency`/`goals` straight off the
+`profiles` row).
 
 `apps/web/src/Onboarding.tsx` drops the L1 `<select>` and its `"l1"` step — becomes a single-step
 consent screen ("I agree to have my voice recorded..." + a continue button). Once consent is
@@ -91,7 +106,9 @@ if (!profile?.consentGivenAt) {
   reject("Recording consent required");
   return;
 }
-const profileComplete = Boolean(profile.name && profile.l1 && profile.goals);
+const profileComplete = Boolean(
+  profile.name && profile.l1 && profile.proficiency && profile.goals,
+);
 ```
 
 If `profileComplete` is false, the session starts in **onboarding mode**: `sendGreeting()` is
@@ -100,7 +117,7 @@ routed to a new `handleOnboardingTurn` instead of `handleTurn`. `l1` isn't read 
 `l1` variable up front (as it is today) since it may not exist yet — it's read once onboarding
 finishes.
 
-When onboarding completes (all three fields collected and persisted), the session flips in place:
+When onboarding completes (all four fields collected and persisted), the session flips in place:
 the closed-over profile data is updated, a short transition line is spoken through the same
 greeting-style pipeline `sendGreeting` uses, and every subsequent `EndOfTurn` for the rest of the
 connection routes to the normal `handleTurn`. No reconnect, no new session row — one continuous
@@ -112,7 +129,7 @@ New `apps/server/src/onboarding/flow.ts` — a pure state machine, unit-testable
 `session.ts`'s WebSocket plumbing (the same separation `llm.ts` already has from `session.ts`).
 
 ```ts
-type OnboardingField = "name" | "l1" | "goals";
+type OnboardingField = "name" | "l1" | "proficiency" | "goals";
 type OnboardingPhase = "asking" | "confirming";
 
 interface OnboardingState {
@@ -121,28 +138,39 @@ interface OnboardingState {
   attempts: number; // extraction attempts spent on the current field, 0-2
   spelling: boolean; // name field only — set once the spell-out fallback has been invoked
   pendingValue: string | null; // candidate value awaiting spoken confirmation
-  collected: { name: string | null; l1: L1 | null; goals: string | null };
+  collected: {
+    name: string | null;
+    l1: L1 | null;
+    proficiency: ProficiencyLevel | null;
+    goals: string | null;
+  };
 }
 ```
 
-Fields are asked in fixed order: `name` → `l1` → `goals`. Per field: **ask → extract → confirm
-(spoken repeat-back) → next field**.
+Fields are asked in fixed order: `name` → `l1` → `proficiency` → `goals`. Proficiency goes right
+before goals deliberately — the goals question's opening line references whatever level the learner
+just gave ("Since you're at an intermediate level, what would you like to focus on — pronunciation,
+grammar, sounding more natural, whatever comes to mind?"), so a blank-page "what do you want to work
+on" never has to stand alone. Per field: **ask → extract → confirm (spoken repeat-back) → next
+field**.
 
 - Every user turn while onboarding calls a new `extractOnboardingAnswer` (in
   `apps/server/src/onboarding/extract.ts`, a `generateObject` call analogous to `analyzeErrors`)
   with the current field and transcript, returning `{ value: string | null; l1: L1 | null;
-confident: boolean }`. `l1` is only populated (and only consulted) on the `l1` step, mapping free
-  speech onto the existing `L1_VALUES` enum.
-- **Low confidence** (`confident: false`) on `attempts === 0`: for `l1` and `goals`, speak a
-  rephrased version of the question ("Sorry, could you say that again?"). For `name` specifically,
-  ask the learner to spell it instead ("Could you spell that for me?"), set `spelling: true`, and
+proficiency: ProficiencyLevel | null; confident: boolean }`. `l1` is only populated (and only
+  consulted) on the `l1` step, mapping free speech onto `L1_VALUES`; `proficiency` likewise only on
+  the `proficiency` step, mapping onto `PROFICIENCY_LEVELS`.
+- **Low confidence** (`confident: false`) on `attempts === 0`: for `l1`, `proficiency`, and `goals`,
+  speak a rephrased version of the question ("Sorry, could you say that again?"). For `name`
+  specifically, ask the learner to spell it instead ("Could you spell that for me?"), set
+  `spelling: true`, and
   route the next turn's extraction through a separate spelling-reconstruction mode in
   `extractOnboardingAnswer` (letters transcribed either run-together, hyphenated, or NATO-style —
   "M as in Mike, A, R, I, A" — are reassembled into a name instead of run through the normal
   free-speech extraction). This is the one field-specific branch in an otherwise generic flow,
   justified by names being the proper-noun case STT reliably mangles, especially for L2-accented
-  speech — `l1` and `goals` don't have the same failure mode since they map onto a fixed enum or
-  tolerate paraphrase respectively. Either way, `attempts` increments and the phase stays `asking`.
+  speech — `l1`, `proficiency`, and `goals` don't have the same failure mode since they map onto a
+  fixed enum or tolerate paraphrase. Either way, `attempts` increments and the phase stays `asking`.
   Low confidence again on `attempts === 1` (spelled or not): accept the best available value — the
   last extracted value if any, else a fixed per-field default (`goals` defaults to `"general accent
   reduction"`) — skip confirmation, and move to the next field. This bounds every field to at most 2
@@ -157,19 +185,21 @@ confident: boolean }`. `l1` is only populated (and only consulted) on the `l1` s
   "No" loops back to `asking` with `attempts` incremented — so a second "no" also fails through to
   the best-effort-accept path above, keeping the same hard cap on rounds per field regardless of
   whether the rejections came from confidence or from confirmation.
-- After `goals` is committed, the flow returns `{ done: true, name, l1, goals }`. `session.ts`
-  persists all three to `profiles` in one `UPDATE`, sends the new `profile_updated` message (below),
-  speaks the transition line, and switches to coaching mode.
+- After `goals` is committed, the flow returns `{ done: true, name, l1, proficiency, goals }`.
+  `session.ts` persists all four to `profiles` in one `UPDATE`, sends the new `profile_updated`
+  message (below), speaks the transition line, and switches to coaching mode.
 
 ## Prompt personalization
 
 `apps/server/src/llm.ts`:
 
-- `buildReplySystemPrompt()` takes `{ name: string; goals: string }` and folds a short paragraph
-  into the existing prompt (e.g. "The learner's name is {name}; they told you they want to work on:
-  {goals}. Use their name naturally sometimes and keep this in mind without being rigid about it.").
-  This is still turn-invariant *within* a session (name/goals don't change turn to turn), so the
-  existing prompt-cache breakpoint behavior in `toCacheableMessages` is unaffected.
+- `buildReplySystemPrompt()` takes `{ name, goals, proficiency }` and folds a short paragraph into
+  the existing prompt (e.g. "The learner's name is {name}, at a {proficiency} level; they told you
+  they want to work on: {goals}. Use their name naturally sometimes, keep their goal in mind without
+  being rigid about it, and match your vocabulary and pacing to their level — simpler and slower for
+  beginner, natural conversational pace for advanced."). This is still turn-invariant *within* a
+  session (none of these change turn to turn), so the existing prompt-cache breakpoint behavior in
+  `toCacheableMessages` is unaffected.
 - `pickGreeting(name?: string)` — for returning users only (`profileComplete` true at connection
   time) — optionally interpolates the name into the existing fixed lines ("Hey María, good to have
   you back — what's on your mind today?"). Onboarding sessions never call `pickGreeting`; they use
@@ -184,7 +214,13 @@ today. Its only change is handling one new message:
 ```ts
 export type ServerToClientMessage =
   | ... // existing variants
-  | { type: "profile_updated"; name: string; l1: L1; goals: string };
+  | {
+      type: "profile_updated";
+      name: string;
+      l1: L1;
+      proficiency: ProficiencyLevel;
+      goals: string;
+    };
 ```
 
 Sent once onboarding completes, so any client-side profile state updates without a refetch of
@@ -194,12 +230,14 @@ Sent once onboarding completes, so any client-side profile state updates without
 
 - `onboarding/flow.ts`: pure unit tests over the state machine — confident-first-try path,
   low-confidence-then-rephrase-then-accept path, confirm-then-reject-then-accept path, the `l1`
-  step's mapping onto `L1_VALUES`, the fixed `goals` default, and the `name` field's spell-out
-  fallback (low confidence → spelling prompt → letter-by-letter repeat-back → confirm).
+  and `proficiency` steps' mapping onto their respective enums, the fixed `goals` default, the
+  goals question referencing the just-collected `proficiency` value, and the `name` field's
+  spell-out fallback (low confidence → spelling prompt → letter-by-letter repeat-back → confirm).
 - `onboarding/extract.ts`: mocked at the LLM-call boundary (consistent with how `llm.ts`'s existing
   passes are tested), not against real model output. Includes cases for the spelling-reconstruction
   mode — run-together letters, hyphenated, and NATO-style ("M as in Mike") transcripts.
 - `session.ts`: extend existing session-route tests to cover the onboarding-mode branch — profile
-  missing `name`/`l1`/`goals` routes turns to `handleOnboardingTurn`; completing onboarding flips
-  subsequent turns to `handleTurn` within the same connection and persists the profile.
+  missing any of `name`/`l1`/`proficiency`/`goals` routes turns to `handleOnboardingTurn`;
+  completing onboarding flips subsequent turns to `handleTurn` within the same connection and
+  persists the profile.
 - `onboarding.ts` route: update existing tests for the shrunk consent-only request/response shape.
