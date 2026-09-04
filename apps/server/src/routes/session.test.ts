@@ -2110,11 +2110,17 @@ describe("onboarding mode", () => {
   it("walks through every field, persists the profile, and switches to coaching mode", async () => {
     await giveConsentOnly();
     onboardingExtractTestState.setAnswerImpl(async (field) => {
-      if (field === "l1") return { value: "Spanish", l1: "spanish", proficiency: null, confident: true };
+      if (field === "l1")
+        return { value: "Spanish", l1: "spanish", proficiency: null, confident: true };
       if (field === "proficiency") {
         return { value: "intermediate", l1: null, proficiency: "intermediate", confident: true };
       }
-      const value = field === "name" ? "Maria" : field === "context" ? "work meetings" : "sounding more natural";
+      const value =
+        field === "name"
+          ? "Maria"
+          : field === "context"
+            ? "work meetings"
+            : "sounding more natural";
       return { value, l1: null, proficiency: null, confident: true };
     });
     const app = buildApp();
@@ -2169,11 +2175,17 @@ describe("onboarding mode", () => {
   it("sends profile_updated once onboarding completes", async () => {
     await giveConsentOnly();
     onboardingExtractTestState.setAnswerImpl(async (field) => {
-      if (field === "l1") return { value: "Spanish", l1: "spanish", proficiency: null, confident: true };
+      if (field === "l1")
+        return { value: "Spanish", l1: "spanish", proficiency: null, confident: true };
       if (field === "proficiency") {
         return { value: "intermediate", l1: null, proficiency: "intermediate", confident: true };
       }
-      const value = field === "name" ? "Maria" : field === "context" ? "work meetings" : "sounding more natural";
+      const value =
+        field === "name"
+          ? "Maria"
+          : field === "context"
+            ? "work meetings"
+            : "sounding more natural";
       return { value, l1: null, proficiency: null, confident: true };
     });
     const app = buildApp();

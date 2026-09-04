@@ -294,7 +294,11 @@ export function registerSessionRoutes(app: FastifyInstance): void {
        * `withActiveTurn` themselves, mirroring how `streamReplyWithPipelinedTTS` takes `aborted`
        * as a parameter rather than managing its own turn.
        */
-      async function speakLine(text: string, aborted: () => boolean): Promise<void> {
+      async function speakLine(
+        text: string,
+        aborted: () => boolean,
+        recordHistory = true,
+      ): Promise<void> {
         send({ type: "reply_text_delta", text });
         const { sentences, remainder } = splitSentences(text);
         const finalSentence = remainder.trim();
@@ -314,7 +318,7 @@ export function registerSessionRoutes(app: FastifyInstance): void {
           }
         }
         if (aborted()) return;
-        conversationHistory.push({ role: "assistant", content: text });
+        if (recordHistory) conversationHistory.push({ role: "assistant", content: text });
         send({ type: "reply_text", text });
         if (!aborted()) {
           replyPlaying = true;
@@ -640,11 +644,10 @@ export function registerSessionRoutes(app: FastifyInstance): void {
 
           if (!result.done) {
             onboardingFlowState = result.state;
-            await speakLine(result.say, aborted);
+            await speakLine(result.say, aborted, false);
             return;
           }
 
-          onboardingFlowState = null;
           const { name, l1: collectedL1, proficiency, context, goals } = result.profile;
           try {
             await db
@@ -656,6 +659,7 @@ export function registerSessionRoutes(app: FastifyInstance): void {
             if (!ended) send({ type: "error", message: "Could not save your profile" });
             return;
           }
+          onboardingFlowState = null;
           l1 = collectedL1;
           replySystemPrompt = buildReplySystemPrompt({ name, proficiency, context, goals });
           send({ type: "profile_updated", name, l1: collectedL1, proficiency, context, goals });
@@ -732,7 +736,7 @@ export function registerSessionRoutes(app: FastifyInstance): void {
 
       if (initialOnboardingLine !== null) {
         const onboardingLine = initialOnboardingLine;
-        void withActiveTurn((aborted) => speakLine(onboardingLine, aborted));
+        void withActiveTurn((aborted) => speakLine(onboardingLine, aborted, false));
       } else {
         void sendGreeting();
       }
