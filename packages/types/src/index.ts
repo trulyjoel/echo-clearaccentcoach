@@ -11,13 +11,20 @@ export type L1 = SupportedL1 | "other";
 
 export const L1_VALUES = [...SUPPORTED_L1S, "other"] as const;
 
+export const PROFICIENCY_LEVELS = ["beginner", "intermediate", "advanced"] as const;
+
+export type ProficiencyLevel = (typeof PROFICIENCY_LEVELS)[number];
+
 export interface OnboardingStatusResponse {
-  l1: L1 | null;
   consentGivenAt: string | null;
+  name: string | null;
+  l1: L1 | null;
+  proficiency: ProficiencyLevel | null;
+  context: string | null;
+  goals: string | null;
 }
 
 export interface OnboardingRequest {
-  l1: L1;
   consent: boolean;
 }
 
@@ -104,6 +111,14 @@ export type ServerToClientMessage =
   | { type: "reply_audio_end" }
   | { type: "reply_interrupted"; reason: "barge_in" | "error" }
   | { type: "session_ended"; reason: SessionEndReason }
+  | {
+      type: "profile_updated";
+      name: string;
+      l1: L1;
+      proficiency: ProficiencyLevel;
+      context: string;
+      goals: string;
+    }
   | { type: "error"; message: string };
 
 /**
