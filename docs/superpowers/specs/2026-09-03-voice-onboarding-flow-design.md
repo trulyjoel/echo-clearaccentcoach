@@ -24,6 +24,10 @@ session opens with a generic greeting and a one-size-fits-all coaching persona.
   reply system prompt — `context` in particular lets the coach steer conversation topics toward
   what the learner actually needs English for, not just correction focus — and (for `name`) the
   returning-user greeting.
+- Keep `l1` doing exactly what it already does today: biasing pass-1 error detection toward known
+  interference patterns for that language (`buildAnalysisSystemPrompt(l1)` / `L1_INTERFERENCE_HINTS`
+  in `llm.ts`, both unchanged). Only *where* `l1` is collected moves — once onboarding sets it, it
+  flows into `analyzeErrors` exactly as it does for a returning user today.
 - Degrade gracefully when speech-to-text or extraction doesn't produce a confident answer, without
   looping indefinitely.
 
@@ -40,7 +44,8 @@ session opens with a generic greeting and a one-size-fits-all coaching persona.
   coarse bucket would throw away, and the only consumer (the reply prompt) can use free text as-is.
 - No editing an already-set profile via voice. Once all five fields are set, a session goes
   straight to coaching mode; changing them later (if ever needed) is a separate feature.
-- `proficiency` and `context` don't feed pass 1 (`analyzeErrors`) — only the reply prompt. Scaling
+- `proficiency` and `context` don't feed pass 1 (`analyzeErrors`) — only the reply prompt. `l1` is
+  the exception: it already biases pass 1 today and keeps doing so unchanged (see Goals). Scaling
   how many errors get flagged per level, or biasing error detection toward a domain (e.g. workplace
   vocabulary), is a plausible follow-up but isn't what was asked for here.
 - No changes to how consent itself is gated or recorded — only the L1 field moves out of the
@@ -125,7 +130,8 @@ If `profileComplete` is false, the session starts in **onboarding mode**: `sendG
 skipped in favor of the onboarding flow's own opening question, and `EndOfTurn` transcripts are
 routed to a new `handleOnboardingTurn` instead of `handleTurn`. `l1` isn't read into the closed-over
 `l1` variable up front (as it is today) since it may not exist yet — it's read once onboarding
-finishes.
+finishes, at which point it's used for `analyzeErrors`/`buildAnalysisSystemPrompt` exactly as it
+already is for a returning user whose profile was already complete at connection time.
 
 When onboarding completes (all five fields collected and persisted), the session flips in place:
 the closed-over profile data is updated, a short transition line is spoken through the same
