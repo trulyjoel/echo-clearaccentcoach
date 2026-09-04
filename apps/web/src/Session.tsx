@@ -397,6 +397,12 @@ export function Session() {
             turns: prev.status === "active" ? prev.turns : [],
           }));
           return;
+        case "profile_updated":
+          // No dedicated UI reads this today — onboarding's questions and the transition line
+          // already rendered through the normal reply_text/reply_audio_end path above. This case
+          // exists so a future consumer (e.g. a profile display) has somewhere to plug in without
+          // needing to touch this switch's exhaustiveness again.
+          return;
         case "error":
           setServerError(message.message);
           // Before session_started, an error means the server rejected the session outright
