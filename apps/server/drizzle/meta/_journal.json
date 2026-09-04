@@ -57,6 +57,13 @@
       "when": 1787000000000,
       "tag": "0007_rename_tts_usage_columns",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1788495786254,
+      "tag": "0008_black_maddog",
+      "breakpoints": true
     }
   ]
 }

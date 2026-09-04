@@ -1,11 +1,16 @@
-import { ERROR_CATEGORIES, L1_VALUES, SESSION_END_REASONS } from "@kalli/types";
+import { ERROR_CATEGORIES, L1_VALUES, PROFICIENCY_LEVELS, SESSION_END_REASONS } from "@kalli/types";
 import { boolean, integer, pgEnum, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
 
 export const l1Enum = pgEnum("l1", [...L1_VALUES]);
+export const proficiencyEnum = pgEnum("proficiency", [...PROFICIENCY_LEVELS]);
 
 export const profiles = pgTable("profiles", {
   clerkUserId: text("clerk_user_id").primaryKey(),
+  name: text("name"),
   l1: l1Enum("l1"),
+  proficiency: proficiencyEnum("proficiency"),
+  context: text("context"),
+  goals: text("goals"),
   consentGivenAt: timestamp("consent_given_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
