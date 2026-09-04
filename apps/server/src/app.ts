@@ -9,10 +9,25 @@ import { registerHistoryRoutes } from "./routes/history.js";
 import { registerOnboardingRoutes } from "./routes/onboarding.js";
 import { registerSessionRoutes } from "./routes/session.js";
 
+/**
+ * Parses a comma-separated WEB_ORIGIN value into exact origins and regexes.
+ *
+ * An entry wrapped in slashes (e.g. `/^https:\/\/foo-.*\.vercel\.app$/`) is treated as a
+ * regex, which lets staging allow Vercel's per-deploy preview origins without hardcoding
+ * one URL that goes stale on every deploy.
+ */
+export function parseWebOrigins(value: string): (string | RegExp)[] {
+  return value.split(",").map((entry) => {
+    const trimmed = entry.trim();
+    const regexMatch = /^\/(.*)\/$/.exec(trimmed);
+    return regexMatch ? new RegExp(regexMatch[1]!) : trimmed;
+  });
+}
+
 export function buildApp(): FastifyInstance {
   const app = Fastify({ logger: true });
 
-  app.register(cors, { origin: process.env["WEB_ORIGIN"] ?? "http://localhost:5173" });
+  app.register(cors, { origin: parseWebOrigins(process.env["WEB_ORIGIN"] ?? "http://localhost:5173") });
   app.register(websocket);
 
   app.get("/health", async () => ({ status: "ok" }));
