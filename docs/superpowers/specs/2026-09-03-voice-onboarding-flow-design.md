@@ -119,6 +119,7 @@ interface OnboardingState {
   field: OnboardingField;
   phase: OnboardingPhase;
   attempts: number; // extraction attempts spent on the current field, 0-2
+  spelling: boolean; // name field only — set once the spell-out fallback has been invoked
   pendingValue: string | null; // candidate value awaiting spoken confirmation
   collected: { name: string | null; l1: L1 | null; goals: string | null };
 }
@@ -132,13 +133,24 @@ Fields are asked in fixed order: `name` → `l1` → `goals`. Per field: **ask �
   with the current field and transcript, returning `{ value: string | null; l1: L1 | null;
 confident: boolean }`. `l1` is only populated (and only consulted) on the `l1` step, mapping free
   speech onto the existing `L1_VALUES` enum.
-- **Low confidence** (`confident: false`) on `attempts === 0`: speak a rephrased version of the
-  question ("Sorry, could you say that again?"), increment `attempts`, stay in `asking`. Low
-  confidence again on `attempts === 1`: accept the best available value — the last extracted value
-  if any, else a fixed per-field default (`goals` defaults to `"general accent reduction"`) — skip
-  confirmation, and move to the next field. This bounds every field to at most 2 extraction rounds.
+- **Low confidence** (`confident: false`) on `attempts === 0`: for `l1` and `goals`, speak a
+  rephrased version of the question ("Sorry, could you say that again?"). For `name` specifically,
+  ask the learner to spell it instead ("Could you spell that for me?"), set `spelling: true`, and
+  route the next turn's extraction through a separate spelling-reconstruction mode in
+  `extractOnboardingAnswer` (letters transcribed either run-together, hyphenated, or NATO-style —
+  "M as in Mike, A, R, I, A" — are reassembled into a name instead of run through the normal
+  free-speech extraction). This is the one field-specific branch in an otherwise generic flow,
+  justified by names being the proper-noun case STT reliably mangles, especially for L2-accented
+  speech — `l1` and `goals` don't have the same failure mode since they map onto a fixed enum or
+  tolerate paraphrase respectively. Either way, `attempts` increments and the phase stays `asking`.
+  Low confidence again on `attempts === 1` (spelled or not): accept the best available value — the
+  last extracted value if any, else a fixed per-field default (`goals` defaults to `"general accent
+  reduction"`) — skip confirmation, and move to the next field. This bounds every field to at most 2
+  extraction rounds, same as before.
 - **Confident** extraction moves to `confirming`: speak a repeat-back ("Got it, María — is that
-  right?") and wait for the next turn. That turn is *also* run through
+  right?"). When `spelling` is true, the repeat-back spells it out letter by letter ("Got it —
+  M, A, R, I, A. Is that right?") rather than just saying the name, since the whole point of that
+  path was the spoken form being unreliable. Then wait for the next turn. That turn is *also* run through
   `extractOnboardingAnswer`, in a confirm-mode that classifies it as yes/no (and, if the learner
   volunteered a correction inline, captures the corrected value). Confirmed "yes" commits
   `pendingValue` into `collected` and moves to the next field (`asking`, `attempts` reset to 0).
@@ -182,9 +194,11 @@ Sent once onboarding completes, so any client-side profile state updates without
 
 - `onboarding/flow.ts`: pure unit tests over the state machine — confident-first-try path,
   low-confidence-then-rephrase-then-accept path, confirm-then-reject-then-accept path, the `l1`
-  step's mapping onto `L1_VALUES`, and the fixed `goals` default.
+  step's mapping onto `L1_VALUES`, the fixed `goals` default, and the `name` field's spell-out
+  fallback (low confidence → spelling prompt → letter-by-letter repeat-back → confirm).
 - `onboarding/extract.ts`: mocked at the LLM-call boundary (consistent with how `llm.ts`'s existing
-  passes are tested), not against real model output.
+  passes are tested), not against real model output. Includes cases for the spelling-reconstruction
+  mode — run-together letters, hyphenated, and NATO-style ("M as in Mike") transcripts.
 - `session.ts`: extend existing session-route tests to cover the onboarding-mode branch — profile
   missing `name`/`l1`/`goals` routes turns to `handleOnboardingTurn`; completing onboarding flips
   subsequent turns to `handleTurn` within the same connection and persists the profile.
