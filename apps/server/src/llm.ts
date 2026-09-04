@@ -1,6 +1,6 @@
 import { createAnthropic } from "@ai-sdk/anthropic";
 import type { AnthropicProvider } from "@ai-sdk/anthropic";
-import type { DetectedError, L1, SupportedL1 } from "@kalli/types";
+import type { DetectedError, L1, ProficiencyLevel, SupportedL1 } from "@kalli/types";
 import { ERROR_CATEGORIES } from "@kalli/types";
 import type { ModelMessage } from "ai";
 import { generateObject, streamText } from "ai";
@@ -39,7 +39,11 @@ export interface LLMProvider {
   /** Pass 1: tags a turn's transcript with grammar errors, biased by the learner's L1. */
   analyzeErrors(transcript: string, l1: L1): Promise<AnalysisResult>;
   /** Pass 2: streams a reply, weaving in a correction for the most relevant error, if any. */
-  generateReply(history: ConversationMessage[], errors: DetectedError[]): ReplyStream;
+  generateReply(
+    history: ConversationMessage[],
+    errors: DetectedError[],
+    systemPrompt: string,
+  ): ReplyStream;
 }
 
 const KALLI_SYSTEM_PROMPT =
@@ -63,10 +67,25 @@ const GREETINGS = [
   "Hey! I'm Kalli — tell me something good.",
 ];
 
-/** Picks one of Kalli's fixed opening lines at random, for some variety session to session. */
-export function pickGreeting(): string {
-  const index = Math.floor(Math.random() * GREETINGS.length);
-  return GREETINGS[index] as string;
+/** Kalli's opening lines for a returning user whose name is already known. */
+function returningGreetings(name: string): string[] {
+  return [
+    `Hey ${name}, good to have you back — what's on your mind today?`,
+    `Hi ${name}! What have you been up to?`,
+    `Hey ${name}! Tell me something good.`,
+  ];
+}
+
+/**
+ * Picks one of Kalli's fixed opening lines at random, for some variety session to session. Takes
+ * the learner's name for a returning user (a profile already complete at connection time) — an
+ * onboarding session never calls this, since it uses the onboarding flow's own opening question
+ * instead (see `session.ts`).
+ */
+export function pickGreeting(name?: string): string {
+  const options = name ? returningGreetings(name) : GREETINGS;
+  const index = Math.floor(Math.random() * options.length);
+  return options[index] as string;
 }
 
 const NO_ERROR_EXAMPLE =
@@ -130,24 +149,37 @@ const errorAnalysisSchema = z.object({
   ),
 });
 
-/**
- * Pass 2's system prompt. Turn-invariant by design (unlike the old per-turn version, which wove
- * the current turn's error list directly into the system text): the reply pass resends the full
- * conversation history every call with no caching elsewhere, so keeping this prompt byte-identical
- * across turns lets a `cache_control` breakpoint at the end of the message list (see
- * `generateReply`) cover it too, instead of invalidating the cache every time the detected errors
- * change.
- */
-const REPLY_SYSTEM_PROMPT =
-  `${KALLI_SYSTEM_PROMPT}\n\n` +
-  "If the learner's last message had flagged grammar errors, they're listed after the message " +
-  "below. Pick the single most relevant one and weave a brief, natural spoken correction into " +
-  "your reply — don't list every error or lecture. If none are listed, reply naturally with no " +
-  `correction.\n\n${NO_ERROR_EXAMPLE}\n${ERROR_PRESENT_EXAMPLES}\n\n${EMPHASIS_INSTRUCTION}`;
+/** The learner data a coaching session's reply prompt is personalized with — computed once a
+ * profile is complete, and turn-invariant for the rest of that session (see `buildReplySystemPrompt`). */
+export interface ReplyProfile {
+  name: string;
+  proficiency: ProficiencyLevel;
+  context: string;
+  goals: string;
+}
 
-/** Builds pass 2's system prompt (turn-invariant — see `REPLY_SYSTEM_PROMPT`). */
-export function buildReplySystemPrompt(): string {
-  return REPLY_SYSTEM_PROMPT;
+/**
+ * Builds pass 2's system prompt for a session, personalized with the learner's onboarding data.
+ * Turn-invariant *for a given profile* — the reply pass resends the full conversation history
+ * every call with no caching elsewhere, so keeping this prompt byte-identical across a session's
+ * turns lets a `cache_control` breakpoint at the end of the message list (see `generateReply`)
+ * cover it too, instead of invalidating the cache every time the detected errors change.
+ */
+export function buildReplySystemPrompt(profile: ReplyProfile): string {
+  const personalization =
+    `The learner's name is ${profile.name}, at a ${profile.proficiency} level; they're improving ` +
+    `their English mainly for ${profile.context}, and told you they want to work on: ` +
+    `${profile.goals}. Use their name naturally sometimes, keep their goal in mind without being ` +
+    "rigid about it, steer conversation topics toward what they actually need English for when it " +
+    "fits naturally, and match your vocabulary and pacing to their level — simpler and slower for " +
+    "beginner, natural conversational pace for advanced.";
+  return (
+    `${KALLI_SYSTEM_PROMPT}\n\n${personalization}\n\n` +
+    "If the learner's last message had flagged grammar errors, they're listed after the message " +
+    "below. Pick the single most relevant one and weave a brief, natural spoken correction into " +
+    "your reply — don't list every error or lecture. If none are listed, reply naturally with no " +
+    `correction.\n\n${NO_ERROR_EXAMPLE}\n${ERROR_PRESENT_EXAMPLES}\n\n${EMPHASIS_INSTRUCTION}`
+  );
 }
 
 /**
@@ -183,13 +215,13 @@ function getReplyModelId(): string {
  * conversational reply generation — defaults to a faster/cheaper model instead of sharing pass
  * 2's, since baseline testing found it a likely source of several seconds of turn latency.
  */
-function getAnalysisModelId(): string {
+export function getAnalysisModelId(): string {
   return process.env["ANALYSIS_LLM_MODEL"] ?? "claude-haiku-4-5-20251001";
 }
 
 let client: AnthropicProvider | undefined;
 
-function getClient(): AnthropicProvider {
+export function getClient(): AnthropicProvider {
   client ??= createAnthropic({ apiKey: getApiKey() });
   return client;
 }
@@ -255,11 +287,15 @@ class AnthropicLLMProvider implements LLMProvider {
     return { errors: object.errors, usage: toTokenUsage(usage), model };
   }
 
-  generateReply(history: ConversationMessage[], errors: DetectedError[]): ReplyStream {
+  generateReply(
+    history: ConversationMessage[],
+    errors: DetectedError[],
+    systemPrompt: string,
+  ): ReplyStream {
     const model = getReplyModelId();
     const result = streamText({
       model: getClient()(model),
-      system: REPLY_SYSTEM_PROMPT,
+      system: systemPrompt,
       messages: toCacheableMessages(history, errors),
       maxOutputTokens: REPLY_MAX_OUTPUT_TOKENS,
     });

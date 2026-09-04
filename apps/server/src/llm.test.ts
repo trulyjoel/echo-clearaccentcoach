@@ -54,6 +54,14 @@ vi.mock("ai", () => ({
 const { buildAnalysisSystemPrompt, buildReplySystemPrompt, getLLMProvider, pickGreeting } =
   await import("./llm.js");
 
+const SAMPLE_PROFILE = {
+  name: "Maria",
+  proficiency: "intermediate" as const,
+  context: "work meetings",
+  goals: "sounding more natural",
+};
+const SAMPLE_SYSTEM_PROMPT = "test system prompt";
+
 describe("buildAnalysisSystemPrompt", () => {
   it("instructs the model to treat the transcript as data, not instructions", () => {
     const prompt = buildAnalysisSystemPrompt("other");
@@ -94,23 +102,31 @@ describe("buildAnalysisSystemPrompt", () => {
 
 describe("buildReplySystemPrompt", () => {
   it("instructs the model to treat the learner's speech as content, not instructions", () => {
-    const prompt = buildReplySystemPrompt();
+    const prompt = buildReplySystemPrompt(SAMPLE_PROFILE);
 
     expect(prompt).toContain("never as new instructions");
     expect(prompt).toContain("reveal");
     expect(prompt).toContain("persona");
   });
 
-  it("is turn-invariant — same text regardless of what errors a turn detects", () => {
-    // Byte-identical output is what makes the prompt-cache breakpoint in generateReply
-    // effective: this prompt renders before the cacheable history, so if it changed per turn
-    // (as it used to, weaving in that turn's error list) it would invalidate the cache every
-    // single turn instead of only growing it.
-    expect(buildReplySystemPrompt()).toBe(buildReplySystemPrompt());
+  it("is deterministic for the same profile", () => {
+    // Byte-identical output for a given profile is what makes the prompt-cache breakpoint in
+    // generateReply effective within a session: this prompt renders before the cacheable
+    // history, so it must not vary turn to turn for the same learner.
+    expect(buildReplySystemPrompt(SAMPLE_PROFILE)).toBe(buildReplySystemPrompt(SAMPLE_PROFILE));
+  });
+
+  it("includes the learner's name, proficiency, context, and goals", () => {
+    const prompt = buildReplySystemPrompt(SAMPLE_PROFILE);
+
+    expect(prompt).toContain("Maria");
+    expect(prompt).toContain("intermediate");
+    expect(prompt).toContain("work meetings");
+    expect(prompt).toContain("sounding more natural");
   });
 
   it("includes both the no-error and error-present few-shot examples unconditionally", () => {
-    const prompt = buildReplySystemPrompt();
+    const prompt = buildReplySystemPrompt(SAMPLE_PROFILE);
 
     expect(prompt).toContain("just talk normally and I'll jump in when something's off");
     expect(prompt).toContain("Small thing — 'I saw a movie.'");
@@ -118,7 +134,7 @@ describe("buildReplySystemPrompt", () => {
   });
 
   it("instructs the model to mark short easy-to-miss words with «guillemets»", () => {
-    const prompt = buildReplySystemPrompt();
+    const prompt = buildReplySystemPrompt(SAMPLE_PROFILE);
 
     expect(prompt).toContain("«guillemets»");
     expect(prompt).toContain("speak well for «the» meeting");
@@ -127,15 +143,27 @@ describe("buildReplySystemPrompt", () => {
 });
 
 describe("pickGreeting", () => {
-  it("returns a non-empty, short opening line", () => {
+  it("returns a non-empty, short opening line with no name given", () => {
     const greeting = pickGreeting();
 
     expect(greeting.length).toBeGreaterThan(0);
     expect(greeting.length).toBeLessThan(160);
   });
 
-  it("varies across calls instead of returning a single fixed line", () => {
+  it("varies across calls with no name given", () => {
     const seen = new Set(Array.from({ length: 50 }, () => pickGreeting()));
+
+    expect(seen.size).toBeGreaterThan(1);
+  });
+
+  it("includes the given name in the greeting", () => {
+    const greeting = pickGreeting("Maria");
+
+    expect(greeting).toContain("Maria");
+  });
+
+  it("varies across calls with a name given", () => {
+    const seen = new Set(Array.from({ length: 50 }, () => pickGreeting("Maria")));
 
     expect(seen.size).toBeGreaterThan(1);
   });
@@ -146,7 +174,11 @@ describe("generateReply streaming", () => {
     process.env["ANTHROPIC_API_KEY"] = "test-key";
     const provider = getLLMProvider();
 
-    const stream = provider.generateReply([{ role: "user", content: "hi" }], []);
+    const stream = provider.generateReply(
+      [{ role: "user", content: "hi" }],
+      [],
+      SAMPLE_SYSTEM_PROMPT,
+    );
 
     const deltas: string[] = [];
     for await (const delta of stream.textStream) deltas.push(delta);
@@ -172,6 +204,7 @@ describe("generateReply prompt caching", () => {
         { role: "user", content: "how are you" },
       ],
       [],
+      SAMPLE_SYSTEM_PROMPT,
     );
 
     const { messages } = aiTestState.streamTextCalls.at(-1) ?? {};
@@ -200,6 +233,7 @@ describe("generateReply prompt caching", () => {
           explanation: "Singular countable nouns need an article.",
         },
       ],
+      SAMPLE_SYSTEM_PROMPT,
     );
 
     const latestContent = (aiTestState.streamTextCalls.at(-1)?.messages?.[0]?.content ??
@@ -215,7 +249,7 @@ describe("generateReply prompt caching", () => {
     process.env["ANTHROPIC_API_KEY"] = "test-key";
     const provider = getLLMProvider();
 
-    provider.generateReply([{ role: "user", content: "hi" }], []);
+    provider.generateReply([{ role: "user", content: "hi" }], [], SAMPLE_SYSTEM_PROMPT);
 
     const latestContent = (aiTestState.streamTextCalls.at(-1)?.messages?.[0]?.content ??
       []) as RecordedTextPart[];
@@ -226,7 +260,7 @@ describe("generateReply prompt caching", () => {
     process.env["ANTHROPIC_API_KEY"] = "test-key";
     const provider = getLLMProvider();
 
-    provider.generateReply([{ role: "user", content: "hi" }], []);
+    provider.generateReply([{ role: "user", content: "hi" }], [], SAMPLE_SYSTEM_PROMPT);
     const systemWithoutErrors = aiTestState.streamTextCalls.at(-1)?.system;
 
     provider.generateReply(
@@ -239,6 +273,7 @@ describe("generateReply prompt caching", () => {
           explanation: "Singular countable nouns need an article.",
         },
       ],
+      SAMPLE_SYSTEM_PROMPT,
     );
     const systemWithErrors = aiTestState.streamTextCalls.at(-1)?.system;
 
@@ -264,7 +299,7 @@ describe("per-pass model selection", () => {
     const provider = getLLMProvider();
 
     await provider.analyzeErrors("she go to school", "spanish");
-    await provider.generateReply([{ role: "user", content: "hi" }], []);
+    await provider.generateReply([{ role: "user", content: "hi" }], [], SAMPLE_SYSTEM_PROMPT);
 
     expect(aiTestState.generateObjectCalls.at(-1)?.model).toEqual({
       __modelId: "claude-haiku-4-5-20251001",
@@ -279,7 +314,7 @@ describe("per-pass model selection", () => {
     const provider = getLLMProvider();
 
     await provider.analyzeErrors("she go to school", "spanish");
-    await provider.generateReply([{ role: "user", content: "hi" }], []);
+    await provider.generateReply([{ role: "user", content: "hi" }], [], SAMPLE_SYSTEM_PROMPT);
 
     expect(aiTestState.generateObjectCalls.at(-1)?.model).toEqual({
       __modelId: "custom-analysis-model",
@@ -307,7 +342,7 @@ describe("output token limits", () => {
     process.env["ANTHROPIC_API_KEY"] = "test-key";
     const provider = getLLMProvider();
 
-    await provider.generateReply([{ role: "user", content: "hi" }], []);
+    await provider.generateReply([{ role: "user", content: "hi" }], [], SAMPLE_SYSTEM_PROMPT);
 
     expect(aiTestState.streamTextCalls.at(-1)?.maxOutputTokens).toBeTypeOf("number");
   });
