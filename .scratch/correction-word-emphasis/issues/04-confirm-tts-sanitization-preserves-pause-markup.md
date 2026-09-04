@@ -7,10 +7,15 @@ avoid this collision.
 
 **Blocked by:** None — can start immediately
 
-**Status:** ready-for-agent
+**Status:** wontfix
 
 - [ ] Text containing both ordinary quoted prose and the pause markup, once run through the
       existing TTS text cleanup, keeps the pause markup fully intact and only strips the ordinary
       quote characters.
 
 ## Comments
+
+Superseded 2026-09-03: the shipped emphasis mechanism (ticket 02) has no pause markup at all —
+capitalizing the marked word turned out sufficient on Inworld's full model, so the
+`<break time='0.3s'/>` this ticket exists to guard never got built. No quote-collision risk to
+regression-test.

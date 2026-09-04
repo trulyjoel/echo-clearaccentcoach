@@ -9,12 +9,21 @@ understands.
 convention; it doesn't call ticket 02's code directly. Coordinate the exact marker characters with
 ticket 02 before both are done.)
 
-**Status:** ready-for-agent
+**Status:** ready-for-human
 
-- [ ] When an error is present, the reply prompt includes guidance and an example showing how to
+- [x] When an error is present, the reply prompt includes guidance and an example showing how to
       mark a short corrected word for emphasis within a natural, in-context phrase.
-- [ ] The guidance explicitly steers away from naming the corrected word in isolation (e.g. "the
+- [x] The guidance explicitly steers away from naming the corrected word in isolation (e.g. "the
       little word 'the'"), since that reads as correcting to a different word rather than
       emphasizing this one.
 
 ## Comments
+
+Implemented 2026-09-03: `EMPHASIS_INSTRUCTION` in `apps/server/src/llm.ts`, appended to
+`REPLY_SYSTEM_PROMPT` after the existing error-correction examples. Marker characters (`«` `»`)
+match ticket 02's resolver exactly, per this ticket's own coordination note. Covered by
+`llm.test.ts`'s "instructs the model to mark short easy-to-miss words with «guillemets»".
+
+Status set to `ready-for-human`: the prompt text itself is tested, but whether Claude actually
+follows this instruction reliably in live conversation — marking at most one word, only when it
+fits the short-word case — hasn't been observed against the real model yet.

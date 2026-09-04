@@ -1,6 +1,15 @@
 # Audio emphasis for missed short words in corrections
 
-Status: ready-for-agent
+Status: ready-for-human — see `issues/` for per-ticket status; all five original tickets are
+closed (implemented or superseded), plus one new ticket (06) not anticipated by this spec.
+
+> **Implemented 2026-09-03 with a different mechanism than this spec describes below.** The TTS
+> provider changed from ElevenLabs to Inworld during design. A live listening comparison (see
+> `issues/02`'s Comments) found that capitalizing the marked word (e.g. "the" → "THE") on
+> Inworld's full model reads clearly on its own — no weak-to-strong-form respelling table, no
+> `<break>` pause markup. The marker protocol below (`«word»`) and the plain/speech dual-view
+> design are otherwise unchanged; read `issues/01`–`06`'s Comments sections for what actually
+> shipped rather than treating the Mechanism/Components sections below as current.
 
 ## Problem
 
