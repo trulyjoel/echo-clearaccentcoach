@@ -1,4 +1,4 @@
-import type { DetectedError, L1, ServerToClientMessage } from "@kalli/types";
+import type { DetectedError, L1, ProficiencyLevel, ServerToClientMessage } from "@kalli/types";
 import { eq } from "drizzle-orm";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -99,6 +99,51 @@ const deepgramTestState = vi.hoisted(() => {
 vi.mock("../deepgram.js", () => ({
   DEEPGRAM_MODEL: "flux-general-en",
   openDeepgramConnection: deepgramTestState.openDeepgramConnection,
+}));
+
+const onboardingExtractTestState = vi.hoisted(() => {
+  type AnswerImpl = (
+    field: string,
+    transcript: string,
+    options: { spelling?: boolean },
+  ) => Promise<{
+    value: string | null;
+    l1: string | null;
+    proficiency: string | null;
+    confident: boolean;
+  }>;
+  type ConfirmationImpl = (transcript: string) => Promise<{ confirmed: boolean }>;
+
+  let answerImpl: AnswerImpl = async () => ({
+    value: null,
+    l1: null,
+    proficiency: null,
+    confident: false,
+  });
+  let confirmationImpl: ConfirmationImpl = async () => ({ confirmed: true });
+
+  return {
+    reset: (): void => {
+      answerImpl = async () => ({ value: null, l1: null, proficiency: null, confident: false });
+      confirmationImpl = async () => ({ confirmed: true });
+    },
+    setAnswerImpl: (impl: AnswerImpl): void => {
+      answerImpl = impl;
+    },
+    setConfirmationImpl: (impl: ConfirmationImpl): void => {
+      confirmationImpl = impl;
+    },
+    extractOnboardingAnswer: vi.fn(
+      (field: string, transcript: string, options: { spelling?: boolean } = {}) =>
+        answerImpl(field, transcript, options),
+    ),
+    extractOnboardingConfirmation: vi.fn((transcript: string) => confirmationImpl(transcript)),
+  };
+});
+
+vi.mock("../onboarding/extract.js", () => ({
+  extractOnboardingAnswer: onboardingExtractTestState.extractOnboardingAnswer,
+  extractOnboardingConfirmation: onboardingExtractTestState.extractOnboardingConfirmation,
 }));
 
 /** turn_index isn't read by the app today, so every fixture below uses a fixed placeholder. */
@@ -220,6 +265,7 @@ const greetingTestState = vi.hoisted(() => {
 vi.mock("../llm.js", () => ({
   getLLMProvider: llmTestState.getLLMProvider,
   pickGreeting: greetingTestState.pickGreeting,
+  buildReplySystemPrompt: vi.fn(() => "mock system prompt"),
 }));
 
 const ttsTestState = vi.hoisted(() => {
@@ -294,9 +340,22 @@ vi.mock("../storage.js", () => ({ getStorageProvider: storageTestState.getStorag
 const { buildApp } = await import("../app.js");
 
 async function giveConsent(l1: L1 = "spanish"): Promise<void> {
-  await db
-    .insert(profiles)
-    .values({ clerkUserId: "test-user-session-456", l1, consentGivenAt: new Date() });
+  await db.insert(profiles).values({
+    clerkUserId: "test-user-session-456",
+    name: "Test User",
+    l1,
+    proficiency: "intermediate",
+    context: "everyday conversation",
+    goals: "general fluency",
+    consentGivenAt: new Date(),
+  });
+}
+
+async function giveConsentOnly(): Promise<void> {
+  await db.insert(profiles).values({
+    clerkUserId: "test-user-session-456",
+    consentGivenAt: new Date(),
+  });
 }
 
 /**
@@ -354,13 +413,13 @@ function mixedQueue(ws: InjectedWebSocket): { next: () => Promise<QueuedFrame> }
 }
 
 /**
- * Drains the greeting turn's frames, sent automatically right after `session_started` for every
- * consented session. Every test below that gets past onboarding/session-cap rejection needs this
- * before asserting on anything else the server sends, since the greeting always runs first. Loops
- * to `reply_audio_end` rather than assuming a fixed frame count — a synthesis failure sends the
- * text frames but no audio chunks, which a hardcoded count would misalign on.
+ * Drains one spoken line's frames — the greeting for a coaching session, or the current question
+ * for an onboarding session — sent automatically right after `session_started`. Every test below
+ * that gets past onboarding/session-cap rejection needs this before asserting on anything else the
+ * server sends. Loops to `reply_audio_end` rather than assuming a fixed frame count — a synthesis
+ * failure sends the text frames but no audio chunks, which a hardcoded count would misalign on.
  */
-async function drainGreeting(queue: { next: () => Promise<QueuedFrame> }): Promise<void> {
+async function drainSpokenLine(queue: { next: () => Promise<QueuedFrame> }): Promise<void> {
   for (;;) {
     const frame = await queue.next();
     if (frame.kind === "json" && frame.message.type === "reply_audio_end") return;
@@ -383,7 +442,7 @@ async function connectAndGreet(
     kind: "json";
     message: { type: "session_started"; sessionId: string };
   };
-  await drainGreeting(queue);
+  await drainSpokenLine(queue);
   return { ws, queue, sessionId: started.message.sessionId };
 }
 
@@ -395,6 +454,7 @@ afterEach(async () => {
   greetingTestState.reset();
   ttsTestState.reset();
   storageTestState.reset();
+  onboardingExtractTestState.reset();
   await db.delete(turnErrors);
   await db.delete(turns);
   await db.delete(usageRecords);
@@ -730,7 +790,7 @@ describe("turn-based reply loop", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
     ttsTestState.clearCalls();
 
     emitEndOfTurn("hello Kalli");
@@ -772,7 +832,7 @@ describe("turn-based reply loop", () => {
       message: { type: "session_started"; sessionId: string };
     };
     const sessionId = started.message.sessionId;
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     emitEndOfTurn("hello Kalli");
     await queue.next(); // transcript
@@ -809,7 +869,7 @@ describe("turn-based reply loop", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     emitEndOfTurn("");
 
@@ -836,7 +896,7 @@ describe("turn-based reply loop", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     emitEndOfTurn("first turn");
     await drainOneTurn(queue);
@@ -872,7 +932,7 @@ describe("turn-based reply loop", () => {
       message: { type: "session_started"; sessionId: string };
     };
     const sessionId = started.message.sessionId;
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     emitEndOfTurn("hello Kalli");
     await queue.next(); // transcript
@@ -907,7 +967,7 @@ describe("turn-based reply loop", () => {
       message: { type: "session_started"; sessionId: string };
     };
     const sessionId = started.message.sessionId;
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     emitEndOfTurn("hello Kalli");
     await queue.next(); // transcript
@@ -953,7 +1013,7 @@ describe("transcript length limit", () => {
       message: { type: "session_started"; sessionId: string };
     };
     const sessionId = started.message.sessionId;
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     emitEndOfTurn("a".repeat(4001));
     await queue.next(); // transcript
@@ -982,7 +1042,7 @@ describe("transcript length limit", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     emitEndOfTurn("a".repeat(4000));
     await queue.next(); // transcript
@@ -1022,7 +1082,7 @@ describe("reply output guard", () => {
       message: { type: "session_started"; sessionId: string };
     };
     const sessionId = started.message.sessionId;
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
     ttsTestState.clearCalls();
 
     emitEndOfTurn("hello Kalli");
@@ -1061,7 +1121,7 @@ describe("two-pass correction pipeline", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     emitEndOfTurn("she go to school");
     await queue.next(); // transcript
@@ -1094,7 +1154,7 @@ describe("two-pass correction pipeline", () => {
       message: { type: "session_started"; sessionId: string };
     };
     const sessionId = started.message.sessionId;
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     emitEndOfTurn("she go to school");
     await queue.next(); // transcript
@@ -1129,7 +1189,7 @@ describe("two-pass correction pipeline", () => {
       message: { type: "session_started"; sessionId: string };
     };
     const sessionId = started.message.sessionId;
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     emitEndOfTurn("hello Kalli");
     await queue.next(); // transcript
@@ -1168,7 +1228,7 @@ describe("two-pass correction pipeline", () => {
       message: { type: "session_started"; sessionId: string };
     };
     const sessionId = started.message.sessionId;
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     emitEndOfTurn("hello Kalli");
     await queue.next(); // transcript
@@ -1221,7 +1281,7 @@ describe("word emphasis", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
     ttsTestState.clearCalls();
 
     emitEndOfTurn("hello Kalli");
@@ -1258,7 +1318,7 @@ describe("word emphasis", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
     ttsTestState.clearCalls();
 
     emitEndOfTurn("hello Kalli");
@@ -1292,7 +1352,7 @@ describe("correction text panel", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     emitEndOfTurn("she go to school");
     await queue.next(); // transcript
@@ -1331,7 +1391,7 @@ describe("correction text panel", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     emitEndOfTurn("hello Kalli");
     await queue.next(); // transcript
@@ -1367,7 +1427,7 @@ describe("L1-driven interference hints", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     emitEndOfTurn("she go to school");
     await drainOneTurn(queue);
@@ -1388,7 +1448,7 @@ describe("L1-driven interference hints", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     emitEndOfTurn("she go to school");
     await drainOneTurn(queue);
@@ -1483,7 +1543,7 @@ describe("usage metering", () => {
       message: { type: "session_started"; sessionId: string };
     };
     const sessionId = started.message.sessionId;
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     emitEndOfTurn("hello Kalli");
     await queue.next(); // transcript
@@ -1528,7 +1588,7 @@ describe("usage metering", () => {
       message: { type: "session_started"; sessionId: string };
     };
     const sessionId = started.message.sessionId;
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     for (let i = 0; i < 2; i++) {
       emitEndOfTurn("hello Kalli");
@@ -1592,7 +1652,7 @@ describe("audio clip capture + storage", () => {
       message: { type: "session_started"; sessionId: string };
     };
     const sessionId = started.message.sessionId;
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     ws.send(Buffer.from([1, 2, 3]));
     ws.send(Buffer.from([4, 5]));
@@ -1631,7 +1691,7 @@ describe("audio clip capture + storage", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     ws.send(Buffer.from([1, 2, 3]));
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -1662,7 +1722,7 @@ describe("audio clip capture + storage", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     // Each turn has a detected error (sampleError), so an extra turn_errors frame is sent too:
     // transcript, end_of_turn, turn_errors, reply_text_delta, 2 audio chunks, reply_text, audio_end.
@@ -1699,7 +1759,7 @@ describe("audio clip capture + storage", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     // Chunk 1 is the session's first-ever chunk (the WebM header). Chunks 2-15 are silence/noise
     // buffered before Flux judges the user actually started speaking — more than the pre-roll
@@ -1735,7 +1795,7 @@ describe("barge-in support", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
     // The greeting counts as "playing" until the client reports it finished, same as any other
     // reply — report that here so the assertion below reflects a genuine no-reply-in-progress
     // state rather than incidentally exercising the greeting's own interruptible window.
@@ -1774,7 +1834,7 @@ describe("barge-in support", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
     // Installed only after the greeting's own synthesize call, which would otherwise consume
     // this pausable generator and hang on `continueSignal` before the turn under test even runs.
     ttsTestState.setSynthesizeImpl(async () => ({
@@ -1829,7 +1889,7 @@ describe("barge-in support", () => {
       message: { type: "session_started"; sessionId: string };
     };
     const sessionId = started.message.sessionId;
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
     // Installed only after the greeting's own synthesize call, which would otherwise consume
     // this pausable generator and hang on `continueSignal` before the turn under test even runs.
     ttsTestState.setSynthesizeImpl(async () => ({
@@ -1875,7 +1935,7 @@ describe("barge-in support", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     emitEndOfTurn("first turn");
     await queue.next(); // transcript
@@ -1933,7 +1993,7 @@ describe("barge-in support", () => {
       message: { type: "session_started"; sessionId: string };
     };
     const sessionId = started.message.sessionId;
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     emitEndOfTurn("first turn");
     await queue.next(); // transcript
@@ -1965,7 +2025,7 @@ describe("barge-in support", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     emitEndOfTurn("hello Kalli");
     await queue.next(); // transcript
@@ -1997,7 +2057,7 @@ describe("barge-in support", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     emitEndOfTurn("hello Kalli");
     await queue.next(); // transcript
@@ -2024,6 +2084,137 @@ describe("barge-in support", () => {
     await queue.next();
     await queue.next();
     await queue.next();
+
+    ws.terminate();
+    await app.close();
+  });
+});
+
+describe("onboarding mode", () => {
+  it("speaks the name question instead of the generic greeting when the profile is incomplete", async () => {
+    await giveConsentOnly();
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", AUTH_HEADERS);
+    const queue = mixedQueue(ws);
+    await queue.next(); // session_started
+    const textFrame = (await queue.next()) as { kind: "json"; message: ServerToClientMessage };
+    if (textFrame.message.type !== "reply_text_delta") throw new Error("expected a spoken line");
+    expect(textFrame.message.text).toContain("call you");
+    await drainSpokenLine(queue);
+    ws.terminate();
+    await app.close();
+  });
+
+  it("walks through every field, persists the profile, and switches to coaching mode", async () => {
+    await giveConsentOnly();
+    onboardingExtractTestState.setAnswerImpl(async (field) => {
+      if (field === "l1") return { value: "Spanish", l1: "spanish", proficiency: null, confident: true };
+      if (field === "proficiency") {
+        return { value: "intermediate", l1: null, proficiency: "intermediate", confident: true };
+      }
+      const value = field === "name" ? "Maria" : field === "context" ? "work meetings" : "sounding more natural";
+      return { value, l1: null, proficiency: null, confident: true };
+    });
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", AUTH_HEADERS);
+    const queue = mixedQueue(ws);
+    await queue.next(); // session_started
+    await drainSpokenLine(queue); // "what should I call you?"
+
+    const fields: Array<"name" | "l1" | "proficiency" | "context" | "goals"> = [
+      "name",
+      "l1",
+      "proficiency",
+      "context",
+      "goals",
+    ];
+    for (const field of fields) {
+      emitStartOfTurn();
+      emitEndOfTurn(`answer for ${field}`);
+      await drainSpokenLine(queue); // confirmation read-back
+      emitStartOfTurn();
+      emitEndOfTurn("yes");
+      if (field !== "goals") {
+        await drainSpokenLine(queue); // next question
+      } else {
+        await drainSpokenLine(queue); // profile_updated fires before the transition line
+      }
+    }
+
+    const [row] = await db
+      .select()
+      .from(profiles)
+      .where(eq(profiles.clerkUserId, "test-user-session-456"));
+    expect(row?.name).toBe("Maria");
+    expect(row?.l1).toBe("spanish");
+    expect(row?.proficiency).toBe("intermediate" satisfies ProficiencyLevel);
+    expect(row?.context).toBe("work meetings");
+    expect(row?.goals).toBe("sounding more natural");
+
+    // A subsequent turn now goes through the normal coaching pipeline, not onboarding extraction.
+    const callsBefore = llmTestState.getCalls().length;
+    emitStartOfTurn();
+    emitEndOfTurn("hello again");
+    await drainSpokenLine(queue);
+    expect(llmTestState.getCalls().length).toBe(callsBefore + 1);
+
+    ws.terminate();
+    await app.close();
+  });
+
+  it("sends profile_updated once onboarding completes", async () => {
+    await giveConsentOnly();
+    onboardingExtractTestState.setAnswerImpl(async (field) => {
+      if (field === "l1") return { value: "Spanish", l1: "spanish", proficiency: null, confident: true };
+      if (field === "proficiency") {
+        return { value: "intermediate", l1: null, proficiency: "intermediate", confident: true };
+      }
+      const value = field === "name" ? "Maria" : field === "context" ? "work meetings" : "sounding more natural";
+      return { value, l1: null, proficiency: null, confident: true };
+    });
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", AUTH_HEADERS);
+    const queue = mixedQueue(ws);
+    await queue.next(); // session_started
+    await drainSpokenLine(queue);
+
+    const fields: Array<"name" | "l1" | "proficiency" | "context" | "goals"> = [
+      "name",
+      "l1",
+      "proficiency",
+      "context",
+      "goals",
+    ];
+    let profileUpdated: Extract<ServerToClientMessage, { type: "profile_updated" }> | undefined;
+    for (const field of fields) {
+      emitStartOfTurn();
+      emitEndOfTurn(`answer for ${field}`);
+      await drainSpokenLine(queue);
+      emitStartOfTurn();
+      emitEndOfTurn("yes");
+      for (;;) {
+        const frame = await queue.next();
+        if (frame.kind === "json" && frame.message.type === "profile_updated") {
+          profileUpdated = frame.message;
+        }
+        if (frame.kind === "json" && frame.message.type === "reply_audio_end") break;
+      }
+    }
+
+    expect(profileUpdated).toEqual({
+      type: "profile_updated",
+      name: "Maria",
+      l1: "spanish",
+      proficiency: "intermediate",
+      context: "work meetings",
+      goals: "sounding more natural",
+    });
 
     ws.terminate();
     await app.close();
