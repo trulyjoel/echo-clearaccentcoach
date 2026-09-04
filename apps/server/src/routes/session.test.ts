@@ -235,25 +235,32 @@ const ttsTestState = vi.hoisted(() => {
     model: MOCK_TTS_MODEL,
   });
   const calls: string[] = [];
+  const providerCalls: { text: string; highQuality: boolean }[] = [];
 
   return {
     model: MOCK_TTS_MODEL,
     reset: (): void => {
       synthesizeImpl = async () => ({ audio: defaultChunks(), model: MOCK_TTS_MODEL });
       calls.length = 0;
+      providerCalls.length = 0;
     },
     setSynthesizeImpl: (fn: (text: string) => Promise<SynthesizeResult>): void => {
       synthesizeImpl = fn;
     },
     getCalls: (): string[] => calls,
+    /** Text paired with the `highQuality` flag `getTTSProvider` was called with, for tests
+     * asserting emphasis routing (correction-word-emphasis spec). */
+    getProviderCalls: (): { text: string; highQuality: boolean }[] => providerCalls,
     /** Clears recorded calls without touching `synthesizeImpl` — for tests that only want to
      * ignore the greeting's synthesize call, made before the turn under test even starts. */
     clearCalls: (): void => {
       calls.length = 0;
+      providerCalls.length = 0;
     },
-    getTTSProvider: vi.fn(() => ({
+    getTTSProvider: vi.fn((options: { highQuality?: boolean } = {}) => ({
       synthesize: async (text: string) => {
         calls.push(text);
+        providerCalls.push({ text, highQuality: options.highQuality ?? false });
         return synthesizeImpl(text);
       },
     })),
@@ -1181,6 +1188,91 @@ describe("two-pass correction pipeline", () => {
   });
 });
 
+describe("word emphasis", () => {
+  /** Drains frames until a JSON message matching `predicate` arrives (inclusive), collecting
+   * every JSON message seen along the way and ignoring binary audio frames — this section cares
+   * about the sequence/content of `reply_text_delta` messages, not their exact interleaving with
+   * audio chunks from a concurrently-running consumeAudio task. */
+  async function collectJsonUntil(
+    queue: { next: () => Promise<QueuedFrame> },
+    predicate: (message: ServerToClientMessage) => boolean,
+  ): Promise<ServerToClientMessage[]> {
+    const messages: ServerToClientMessage[] = [];
+    for (;;) {
+      const frame = await queue.next();
+      if (frame.kind !== "json") continue;
+      messages.push(frame.message);
+      if (predicate(frame.message)) return messages;
+    }
+  }
+
+  it("routes only the sentence with an emphasis marker to the high-quality TTS tier", async () => {
+    await giveConsent();
+    // The whole reply arrives as a single delta (this fixture's shape) with a sentence boundary
+    // before the marker — the case that requires per-segment (not per-delta) flag tracking, since
+    // the earlier sentence must NOT be flagged just because the same delta later contains a
+    // marker.
+    llmTestState.setReplyImpl(async () => "Nice try! You'd say I went to «the» store.");
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    await queue.next(); // session_started
+    await drainGreeting(queue);
+    ttsTestState.clearCalls();
+
+    emitEndOfTurn("hello Kalli");
+    await queue.next(); // transcript
+    await queue.next(); // end_of_turn
+
+    const messages = await collectJsonUntil(queue, (m) => m.type === "reply_text");
+
+    // Marker stripped, original casing — the client never sees the «» sentinel, across however
+    // many reply_text_delta segments the marker split the stream into.
+    const deltas = messages.filter((m) => m.type === "reply_text_delta").map((m) => m.text);
+    expect(deltas.join("")).toBe("Nice try! You'd say I went to the store.");
+    expect(messages.at(-1)).toEqual({
+      type: "reply_text",
+      text: "Nice try! You'd say I went to the store.",
+    });
+
+    expect(ttsTestState.getProviderCalls()).toEqual([
+      { text: "Nice try!", highQuality: false },
+      { text: "You'd say I went to THE store.", highQuality: true },
+    ]);
+
+    ws.terminate();
+    await app.close();
+  });
+
+  it("does not route to the high-quality tier when a reply has no emphasis marker", async () => {
+    await giveConsent();
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    await queue.next(); // session_started
+    await drainGreeting(queue);
+    ttsTestState.clearCalls();
+
+    emitEndOfTurn("hello Kalli");
+    await queue.next(); // transcript
+    await queue.next(); // end_of_turn
+    await collectJsonUntil(queue, (m) => m.type === "reply_audio_end");
+
+    expect(ttsTestState.getProviderCalls()).toEqual([{ text: "Nice job!", highQuality: false }]);
+
+    ws.terminate();
+    await app.close();
+  });
+});
+
 describe("correction text panel", () => {
   const sampleError: DetectedError = {
     category: "subject_verb_agreement",
@@ -1625,9 +1717,7 @@ describe("audio clip capture + storage", () => {
 
     const uploads = storageTestState.getUploads();
     expect(uploads).toHaveLength(1);
-    expect(uploads[0]?.data).toEqual(
-      Buffer.from([1, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]),
-    );
+    expect(uploads[0]?.data).toEqual(Buffer.from([1, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]));
 
     ws.terminate();
     await app.close();

@@ -116,6 +116,14 @@ describe("buildReplySystemPrompt", () => {
     expect(prompt).toContain("Small thing — 'I saw a movie.'");
     expect(prompt).toContain("you'd say 'I've been living here for three years' though");
   });
+
+  it("instructs the model to mark short easy-to-miss words with «guillemets»", () => {
+    const prompt = buildReplySystemPrompt();
+
+    expect(prompt).toContain("«guillemets»");
+    expect(prompt).toContain("speak well for «the» meeting");
+    expect(prompt).toContain("at most one word per reply");
+  });
 });
 
 describe("pickGreeting", () => {

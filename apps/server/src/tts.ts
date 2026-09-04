@@ -221,10 +221,16 @@ class ChatterboxTurboTTSProvider implements TTSProvider {
  * across Inworld's own quickstart examples, so a safe reasonable default. */
 const DEFAULT_INWORLD_VOICE_ID = "Sarah";
 /** Flash is Inworld's cheapest/fastest tier (~$5-15/1M chars, ~20ms TTFB per their docs) — the one
- * that was actually evaluated for cost. The full `inworld-tts-2` additionally supports
- * natural-language delivery steering (not just the `[laugh]`-style tags, which both models
- * support) at a materially higher price; switch via `INWORLD_MODEL` if that's worth it later. */
+ * that was actually evaluated for cost, and the default for ordinary sentences. */
 const DEFAULT_INWORLD_MODEL = "inworld-tts-2-flash";
+/**
+ * The full model, used only for the one sentence per turn (if any) carrying an emphasized word
+ * (see `emphasisMarkers.ts`) — confirmed via listening comparison that capitalization-based
+ * emphasis (`getTTSProvider`'s `highQuality` option) reads clearly on `inworld-tts-2` but not on
+ * `inworld-tts-2-flash`. Materially higher latency/cost than flash, which is why it's scoped to
+ * just the emphasized sentence rather than used as the default.
+ */
+const EMPHASIS_INWORLD_MODEL = "inworld-tts-2";
 
 function getInworldApiKey(): string {
   const apiKey = process.env["INWORLD_API_KEY"];
@@ -268,10 +274,9 @@ async function* parseInworldStream(body: ReadableStream<Uint8Array>): AsyncItera
 }
 
 /**
- * UNVERIFIED against the live API — built strictly from Inworld's published docs
- * (docs.inworld.ai/api-reference/ttsAPI/texttospeech/synthesize-speech-stream), since no
- * INWORLD_API_KEY has been available to test against. Confirm the NDJSON parsing and request shape
- * against a real response before relying on this in production.
+ * Verified against the live API (2026-09-03 listening comparison — see
+ * `scripts/inworldEmphasis.ts`/`inworldModelSwitch.ts`): NDJSON parsing and request shape both
+ * confirmed correct.
  *
  * `audioConfig.audioEncoding` is left at its documented default (`MP3`) rather than specified
  * explicitly — unlike Kokoro, where the default had to be overridden because DeepInfra's default is
@@ -280,8 +285,9 @@ async function* parseInworldStream(body: ReadableStream<Uint8Array>): AsyncItera
 export async function synthesizeInworld(
   text: string,
   voiceId: string,
+  modelOverride?: string,
 ): Promise<{ audio: AsyncIterable<Uint8Array>; model: string }> {
-  const model = process.env["INWORLD_MODEL"] || DEFAULT_INWORLD_MODEL;
+  const model = modelOverride || process.env["INWORLD_MODEL"] || DEFAULT_INWORLD_MODEL;
   const response = await fetch("https://api.inworld.ai/tts/v1/voice:stream", {
     method: "POST",
     headers: {
@@ -297,9 +303,25 @@ export async function synthesizeInworld(
 }
 
 class InworldTTSProvider implements TTSProvider {
+  constructor(private readonly modelOverride?: string) {}
+
   synthesize(text: string): Promise<{ audio: AsyncIterable<Uint8Array>; model: string }> {
-    return synthesizeInworld(text, process.env["INWORLD_VOICE_ID"] || DEFAULT_INWORLD_VOICE_ID);
+    return synthesizeInworld(
+      text,
+      process.env["INWORLD_VOICE_ID"] || DEFAULT_INWORLD_VOICE_ID,
+      this.modelOverride,
+    );
   }
+}
+
+export interface GetTTSProviderOptions {
+  /**
+   * Routes this call to the higher-quality (and higher-latency/cost) tier when the provider
+   * supports one — currently only Inworld, whose emphasis markup (`emphasisMarkers.ts`) reads
+   * clearly on `inworld-tts-2` but not on the default `inworld-tts-2-flash`. Providers with no
+   * such tier ignore this option.
+   */
+  highQuality?: boolean;
 }
 
 /**
@@ -308,10 +330,12 @@ class InworldTTSProvider implements TTSProvider {
  * cached independently) so the env var can be flipped per-call, which is also what makes it
  * straightforward to exercise every branch in tests.
  */
-export function getTTSProvider(): TTSProvider {
+export function getTTSProvider(options: GetTTSProviderOptions = {}): TTSProvider {
   const providerName = process.env["TTS_PROVIDER"];
   if (providerName === "elevenlabs") return new ElevenLabsTTSProvider();
   if (providerName === "chatterbox-turbo") return new ChatterboxTurboTTSProvider();
-  if (providerName === "inworld") return new InworldTTSProvider();
+  if (providerName === "inworld") {
+    return new InworldTTSProvider(options.highQuality ? EMPHASIS_INWORLD_MODEL : undefined);
+  }
   return new KokoroTTSProvider();
 }

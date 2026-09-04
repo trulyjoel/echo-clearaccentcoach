@@ -15,6 +15,7 @@ import { db } from "../db/client.js";
 import { profiles, sessions, turnErrors, turns } from "../db/schema.js";
 import type { DeepgramConnection } from "../deepgram.js";
 import { DEEPGRAM_MODEL, openDeepgramConnection } from "../deepgram.js";
+import { createMarkerResolver } from "../emphasisMarkers.js";
 import type { AnalysisResult, ConversationMessage, TokenUsage } from "../llm.js";
 import { getLLMProvider, pickGreeting } from "../llm.js";
 import { containsDisallowedContent } from "../outputGuard.js";
@@ -256,19 +257,30 @@ export function registerSessionRoutes(app: FastifyInstance): void {
         // Pass a snapshot: conversationHistory keeps mutating (the assistant reply below, future
         // turns) after this call is made, and callers/tests may hold onto this array.
         const replyStream = getLLMProvider().generateReply([...conversationHistory], errors);
-        const sentenceQueue = new AsyncQueue<string>();
+        const sentenceQueue = new AsyncQueue<{ text: string; highQuality: boolean }>();
+        // Resolves «word» emphasis markers (correction-word-emphasis spec) — feeds the plain
+        // (marker-stripped) form to captions/persistence/history, and the speech form
+        // (marked word upper-cased) to sentence-splitting/TTS below. Upper-casing is a pure case
+        // transform, so `sentenceBuffer` (speech form) and `replyText` (plain form) stay
+        // character-length-identical throughout, even though only the speech side is actually
+        // sentence-split here.
+        const markerResolver = createMarkerResolver();
         let sentenceBuffer = "";
+        // True once the in-progress sentence has resolved a marker — reset after each sentence is
+        // queued. At most one marker per reply (per the system prompt), so there's no ambiguity
+        // about which in-progress sentence a resolved marker belongs to.
+        let sentenceHasEmphasis = false;
         let replyText = "";
         let audioFailed = false;
 
         async function consumeAudio(): Promise<void> {
           try {
-            for await (const sentence of sentenceQueue) {
+            for await (const { text, highQuality } of sentenceQueue) {
               if (aborted()) return;
-              const { audio, model } = await getTTSProvider().synthesize(sentence);
+              const { audio, model } = await getTTSProvider({ highQuality }).synthesize(text);
               // Characters are billed by the TTS vendor as soon as the call is made, regardless
               // of whether the resulting stream is fully consumed.
-              await recordUsage(sessionId, { ttsCharacters: sentence.length, ttsModel: model });
+              await recordUsage(sessionId, { ttsCharacters: text.length, ttsModel: model });
               for await (const chunk of audio) {
                 if (aborted()) return;
                 socket.send(Buffer.from(chunk));
@@ -293,25 +305,35 @@ export function registerSessionRoutes(app: FastifyInstance): void {
         // time its sentence boundary is detected — only the audio side is guarded here.
         let blocked = false;
         try {
-          for await (const delta of replyStream.textStream) {
+          deltaLoop: for await (const delta of replyStream.textStream) {
             if (aborted()) break;
-            replyText += delta;
-            send({ type: "reply_text_delta", text: delta });
-            const { sentences, remainder } = splitSentences(sentenceBuffer + delta);
-            sentenceBuffer = remainder;
-            for (const sentence of sentences) {
-              if (containsDisallowedContent(sentence)) {
-                blocked = true;
-                break;
+            // Segments (not one aggregated result per delta) so a sentence boundary and a marker
+            // landing in the same delta are handled in the order they actually occur — a
+            // sentence completed in an earlier segment must not be flagged by a marker resolved
+            // in a later one within the same delta.
+            for (const segment of markerResolver.feed(delta)) {
+              replyText += segment.plain;
+              if (segment.plain) send({ type: "reply_text_delta", text: segment.plain });
+              if (segment.emphasized) sentenceHasEmphasis = true;
+              const { sentences, remainder } = splitSentences(sentenceBuffer + segment.speechText);
+              sentenceBuffer = remainder;
+              for (const sentence of sentences) {
+                if (containsDisallowedContent(sentence)) {
+                  blocked = true;
+                  break deltaLoop;
+                }
+                sentenceQueue.push({ text: sentence, highQuality: sentenceHasEmphasis });
+                sentenceHasEmphasis = false;
               }
-              sentenceQueue.push(sentence);
             }
-            if (blocked) break;
           }
-          const finalSentence = sentenceBuffer.trim();
+          const flushed = markerResolver.flush();
+          replyText += flushed.plain;
+          if (flushed.plain) send({ type: "reply_text_delta", text: flushed.plain });
+          const finalSentence = (sentenceBuffer + flushed.speechText).trim();
           if (!blocked && finalSentence && !aborted()) {
             if (containsDisallowedContent(finalSentence)) blocked = true;
-            else sentenceQueue.push(finalSentence);
+            else sentenceQueue.push({ text: finalSentence, highQuality: sentenceHasEmphasis });
           }
         } catch (error) {
           request.log.error(error, "Failed to generate reply");

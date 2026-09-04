@@ -79,6 +79,22 @@ const ERROR_PRESENT_EXAMPLES =
   'Example — Learner: "I am living here since three years." Kalli: "Three years, that\'s a ' +
   "while — you'd say 'I've been living here for three years' though.\"";
 
+/**
+ * Short function words (articles, some prepositions) get spoken with a reduced vowel by default
+ * and pass by too fast for the learner to register them as the point of the correction. Marking
+ * the exact occurrence inline — rather than naming the word in isolation, which reads as a
+ * substitution error rather than emphasis — lets a downstream resolver (`emphasisMarkers.ts`)
+ * route just that word to audibly distinct TTS treatment. Category-agnostic by design: "is the
+ * corrected word short and easy to miss," not hardcoded to `article_usage`.
+ */
+const EMPHASIS_INSTRUCTION =
+  "When the corrected word is short and easy to miss (an article or short preposition, e.g. " +
+  "'a', 'the', 'to'), mark just that one word by wrapping it in «guillemets» inline, in its " +
+  "real grammatical position within your natural correction — don't name or quote the word on " +
+  'its own. Example — Learner: "I want to speak well for meeting." Kalli: "You\'d say \'speak ' +
+  "well for «the» meeting.'\" Mark at most one word per reply, and only when it fits this " +
+  "short-word case — most replies won't need it.";
+
 const ANALYSIS_SYSTEM_PROMPT =
   "You are an English grammar analyst reviewing a language learner's spoken utterance. " +
   "Identify grammar errors, tagging each with exactly one of these categories: " +
@@ -127,7 +143,7 @@ const REPLY_SYSTEM_PROMPT =
   "If the learner's last message had flagged grammar errors, they're listed after the message " +
   "below. Pick the single most relevant one and weave a brief, natural spoken correction into " +
   "your reply — don't list every error or lecture. If none are listed, reply naturally with no " +
-  `correction.\n\n${NO_ERROR_EXAMPLE}\n${ERROR_PRESENT_EXAMPLES}`;
+  `correction.\n\n${NO_ERROR_EXAMPLE}\n${ERROR_PRESENT_EXAMPLES}\n\n${EMPHASIS_INSTRUCTION}`;
 
 /** Builds pass 2's system prompt (turn-invariant — see `REPLY_SYSTEM_PROMPT`). */
 export function buildReplySystemPrompt(): string {
