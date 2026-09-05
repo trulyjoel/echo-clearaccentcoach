@@ -217,10 +217,12 @@ function buildPronunciationErrorContext(errors: DetectedPronunciationError[]): s
   const errorList = errors
     .map((error) => {
       const spoken = error.spokenPhoneme ?? "(nothing)";
-      return (
-        `- "${error.word}": expected /${error.expectedPhoneme}/, said /${spoken}/ ` +
-        `(${error.op})`
-      );
+      const evidence =
+        error.source === "audio"
+          ? `expected /${error.expectedPhoneme}/, said /${spoken}/`
+          : `expected /${error.expectedPhoneme}/, may have said /${spoken}/ (inferred from the ` +
+            `transcript revising itself mid-turn, not confirmed against the audio)`;
+      return `- "${error.word}": ${evidence} (${error.op})`;
     })
     .join("\n");
   return `\n\nFlagged pronunciation errors in the message above:\n${errorList}`;

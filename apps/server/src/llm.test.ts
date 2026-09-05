@@ -295,7 +295,7 @@ describe("generateReply with pronunciation errors", () => {
     const stream = provider.generateReply(
       [{ role: "user", content: "he rike it" }],
       [],
-      [{ word: "like", op: "sub", expectedPhoneme: "L", spokenPhoneme: "R" }],
+      [{ word: "like", op: "sub", expectedPhoneme: "L", spokenPhoneme: "R", source: "audio" }],
       SAMPLE_SYSTEM_PROMPT,
     );
     for await (const _ of stream.textStream) {
@@ -310,6 +310,35 @@ describe("generateReply with pronunciation errors", () => {
     expect(text).toContain("like");
     expect(text).toContain("L");
     expect(text).toContain("R");
+  });
+
+  it("phrases a transcript-revision-sourced error more tentatively than an audio-sourced one", async () => {
+    aiTestState.streamTextCalls.length = 0;
+    const provider = getLLMProvider();
+
+    const stream = provider.generateReply(
+      [{ role: "user", content: "I had a very good day" }],
+      [],
+      [
+        {
+          word: "very",
+          op: "sub",
+          expectedPhoneme: "V",
+          spokenPhoneme: "B",
+          source: "transcript_revision",
+        },
+      ],
+      SAMPLE_SYSTEM_PROMPT,
+    );
+    for await (const _ of stream.textStream) {
+      // drain
+    }
+
+    const call = aiTestState.streamTextCalls.at(-1);
+    const lastMessage = call?.messages?.at(-1);
+    const content = lastMessage?.content;
+    const text = (content as { text: string }[]).map((part) => part.text).join("");
+    expect(text).toContain("may have said");
   });
 
   it("omits the pronunciation-error block when the list is empty", async () => {
