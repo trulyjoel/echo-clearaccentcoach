@@ -337,6 +337,11 @@ export function Session() {
             };
           });
           return;
+        case "turn_pronunciation_errors":
+          // No correction panel exists yet for pronunciation errors (separate future ticket) —
+          // this case exists so a future consumer has somewhere to plug in without needing to
+          // touch this switch's exhaustiveness again.
+          return;
         case "reply_text_delta": {
           // The first delta of a reply is also what starts its audio session — audio can start
           // streaming before the full reply text (and thus `reply_text`) is known (ticket 17),
