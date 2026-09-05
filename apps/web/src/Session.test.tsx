@@ -858,7 +858,14 @@ describe("Session", () => {
       turnId: "turn-1",
       createdAt: "2026-07-18T12:00:00.000Z",
       errors: [
-        { id: "error-1", word: "like", op: "sub", expectedPhoneme: "L", spokenPhoneme: "R" },
+        {
+          id: "error-1",
+          word: "like",
+          op: "sub",
+          expectedPhoneme: "L",
+          spokenPhoneme: "R",
+          source: "audio",
+        },
       ],
     });
 
