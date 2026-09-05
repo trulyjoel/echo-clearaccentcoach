@@ -60,4 +60,45 @@ describe("HttpPronunciationProvider", () => {
       getPronunciationProvider().scoreTurn(Buffer.from([1, 2, 3]), SAMPLE_PHONES),
     ).rejects.toThrow("503");
   });
+
+  it("rejects when the response body doesn't match the expected schema", async () => {
+    process.env["PRONUNCIATION_SERVICE_URL"] = "https://pronunciation.example.test";
+    global.fetch = vi.fn(async () =>
+      jsonResponse({
+        editOps: [
+          { word: "like", wordIndex: 0, op: "bogus", expectedPhoneme: "L", spokenPhoneme: "R" },
+        ],
+      }),
+    ) as unknown as typeof fetch;
+
+    await expect(
+      getPronunciationProvider().scoreTurn(Buffer.from([1, 2, 3]), SAMPLE_PHONES),
+    ).rejects.toThrow();
+  });
+
+  it("rejects when the response body is missing the editOps field", async () => {
+    process.env["PRONUNCIATION_SERVICE_URL"] = "https://pronunciation.example.test";
+    global.fetch = vi.fn(async () => jsonResponse({})) as unknown as typeof fetch;
+
+    await expect(
+      getPronunciationProvider().scoreTurn(Buffer.from([1, 2, 3]), SAMPLE_PHONES),
+    ).rejects.toThrow();
+  });
+
+  it("rejects when the request never resolves within the timeout", async () => {
+    process.env["PRONUNCIATION_SERVICE_URL"] = "https://pronunciation.example.test";
+    let capturedSignal: AbortSignal | undefined;
+    global.fetch = vi.fn(async (_url: string | URL, init?: RequestInit) => {
+      capturedSignal = init?.signal ?? undefined;
+      return new Promise<Response>((_resolve, reject) => {
+        capturedSignal?.addEventListener("abort", () => reject(new DOMException("", "AbortError")));
+      });
+    }) as unknown as typeof fetch;
+
+    const promise = getPronunciationProvider().scoreTurn(Buffer.from([1, 2, 3]), SAMPLE_PHONES);
+    expect(capturedSignal).toBeInstanceOf(AbortSignal);
+    capturedSignal?.dispatchEvent(new Event("abort"));
+
+    await expect(promise).rejects.toThrow();
+  });
 });
