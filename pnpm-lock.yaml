@@ -53,6 +53,9 @@ importers:
       fastify:
         specifier: 5.10.0
         version: 5.10.0
+      phonemize:
+        specifier: 1.2.0
+        version: 1.2.0
       postgres:
         specifier: 3.4.9
         version: 3.4.9
@@ -2025,6 +2028,9 @@ packages:
       encoding:
         optional: true
 
+  number-to-words@1.2.4:
+    resolution: {integrity: sha512-/fYevVkXRcyBiZDg6yzZbm0RuaD6i0qRfn8yr+6D0KgBMOndFPxuW10qCHpzs50nN8qKuv78k8MuotZhcVX6Pw==}
+
   obug@2.1.3:
     resolution: {integrity: sha512-9miFgM2OFba7hB+pRgvtV84pYTBaoTHohvmIgiRt6dRIzbwEOIaNaP+dIlGs2fNFoB0SeISs0Jz5WFVRid6Xyg==}
     engines: {node: '>=12.20.0'}
@@ -2068,6 +2074,9 @@ packages:
   pathe@2.0.3:
     resolution: {integrity: sha512-WUjGcAqP1gQacoQe+OBJsFA7Ld4DyXuUIjZ5cc75cLHvJ7dtNsTugphxIADwspS+AraAUePCKrSVtPLFj/F88w==}
 
+  phonemize@1.2.0:
+    resolution: {integrity: sha512-+zEpOPXrEaylYCIXMSDVhiAwFbVzIXRf+7vheuNxozg4hLKbQVDXCOpI0GAJw41xEgE9LcwMjLUN30aWrpwSkw==}
+
   picocolors@1.1.1:
     resolution: {integrity: sha512-xceH2snhtb5M9liqDsmEw56le376mTZkEX/jEb/RxNFyegNul7eNslCXP9FDj/Lcu0X8KEyMceP2ntpaHrDEVA==}
 
@@ -2084,6 +2093,9 @@ packages:
   pino@10.3.1:
     resolution: {integrity: sha512-r34yH/GlQpKZbU1BvFFqOjhISRo1MNx1tWYsYvmj6KIRHSPMT2+yHOEb1SG6NMvRoHRF0a07kCOox/9yakl1vg==}
     hasBin: true
+
+  pinyin-pro@3.29.3:
+    resolution: {integrity: sha512-+UU9bx6vfDw8amOJGHm0TE0rdQl8VPylsDWviQ5OOQ3e+on1xRP4OqDbiDuMT5OISgvfl/Y6ez1BBRaIP80GLQ==}
 
   postcss@8.5.19:
     resolution: {integrity: sha512-Mz8SaolMd8nB+G13WkORcxQKHZ/NE4xXevtkJHVuG+guo9/wYKlIMTKAqGdEmYOXR2ijPjTYNHssizdaVSUNdQ==}
@@ -3921,6 +3933,8 @@ snapshots:
     dependencies:
       whatwg-url: 5.0.0
 
+  number-to-words@1.2.4: {}
+
   obug@2.1.3: {}
 
   on-exit-leak-free@2.1.2: {}
@@ -3981,6 +3995,11 @@ snapshots:
 
   pathe@2.0.3: {}
 
+  phonemize@1.2.0:
+    dependencies:
+      number-to-words: 1.2.4
+      pinyin-pro: 3.29.3
+
   picocolors@1.1.1: {}
 
   picomatch@4.0.5: {}
@@ -4004,6 +4023,8 @@ snapshots:
       safe-stable-stringify: 2.5.0
       sonic-boom: 4.2.1
       thread-stream: 4.2.0
+
+  pinyin-pro@3.29.3: {}
 
   postcss@8.5.19:
     dependencies:
