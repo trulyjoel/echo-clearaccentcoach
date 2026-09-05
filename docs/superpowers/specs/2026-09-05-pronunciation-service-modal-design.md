@@ -49,11 +49,15 @@ apps/pronunciation-service/
 ├── models.py          # HuperModels: loads Recognizer + Corrector once per container
 ├── pipeline.py         # pure functions: decode_audio, run_recognizer, run_corrector, to_edit_ops
 ├── schemas.py          # pydantic request/response models matching the fixed wire contract
-├── pipeline_test.py     # pytest: decode_audio for real, to_edit_ops against fake phone-op sequences
-├── schemas_test.py      # pytest: request validation and auth-failure paths
+├── tests/
+│   ├── test_pipeline.py # pytest: decode_audio for real, to_edit_ops against fake phone-op sequences
+│   └── test_schemas.py  # pytest: request validation and auth-failure paths
 ├── pyproject.toml       # uv-managed deps; ruff/ty config
 └── README.md            # deploy instructions, secret provisioning
 ```
+
+Tests live under `tests/`, mirroring the package structure (the global Python convention), not
+colocated — the colocated `*.test.ts` pattern is TS-specific and doesn't apply here.
 
 `pipeline.py` has no Modal imports and no I/O beyond what's passed into its functions — it takes
 bytes/arrays/plain data structures and returns them, the same pure/adapter split already used on the
@@ -143,16 +147,16 @@ so widening the type is all that's required there.
 
 ## Testing
 
-- `pipeline_test.py`: `decode_audio` tested for real against a small fixture WebM clip (ffmpeg
+- `tests/test_pipeline.py`: `decode_audio` tested for real against a small fixture WebM clip (ffmpeg
   isn't a model — deterministic and cheap enough to exercise directly, not worth mocking).
   `to_edit_ops` tested against hand-built fake `PhoneEditOp` sequences covering: a clean `SUB`, a
   `DEL` (null `spokenPhoneme`), a leading `INS` (attributed to the first word, null
   `expectedPhoneme`), and two deviations landing on the same word (two entries, same `wordIndex`).
   `run_recognizer`/`run_corrector` get a thin call-through test only — there's nothing but a model
   call to exercise until a real-model integration test exists (deferred, see Non-goals).
-- `schemas_test.py`: malformed `canonical_phones` JSON, missing audio part, wrong/missing auth token
-  → expected `4xx`/`401`. Nothing here touches Modal's decorators or deploys anything; everything
-  runs as plain pytest against `pipeline.py`/`schemas.py` directly.
+- `tests/test_schemas.py`: malformed `canonical_phones` JSON, missing audio part, wrong/missing auth
+  token → expected `4xx`/`401`. Nothing here touches Modal's decorators or deploys anything;
+  everything runs as plain pytest against `pipeline.py`/`schemas.py` directly.
 - TS-side: see the specific test additions listed under "TS-side follow-up" above.
 
 ## Further notes
