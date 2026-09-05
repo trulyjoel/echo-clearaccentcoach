@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { g2p } from "./g2p.js";
+import { g2p, HUPER_VALID_PHONES } from "./g2p.js";
 
 describe("g2p", () => {
   it("produces word-aligned ARPAbet phones with no stress digits for a dictionary word", () => {
@@ -35,5 +35,47 @@ describe("g2p", () => {
   it("returns an empty array for an empty or whitespace-only transcript", () => {
     expect(g2p("")).toEqual([]);
     expect(g2p("   ")).toEqual([]);
+  });
+
+  it("every phone g2p ever emits is a member of HuPER's 39-phone vocabulary", () => {
+    const result = g2p("I like cats hello 1995");
+    for (const { phones } of result) {
+      for (const phone of phones) expect(HUPER_VALID_PHONES.has(phone)).toBe(true);
+    }
+  });
+
+  it("normalizes phonemize's extended symbols (AX, EL) to HuPER-valid phones for a word known to trigger them", () => {
+    const result = g2p("hello");
+
+    expect(result).toHaveLength(1);
+    const phones = result[0]?.phones ?? [];
+    expect(phones).not.toContain("AX");
+    expect(phones).not.toContain("EL");
+    for (const phone of phones) expect(HUPER_VALID_PHONES.has(phone)).toBe(true);
+  });
+
+  it("joins phones from every expanded entry for a number, without truncating to just the first", () => {
+    const result = g2p("1995");
+
+    expect(result).toHaveLength(1);
+    expect(result[0]?.word).toBe("1995");
+    // "1995" expands to three entries ("nineteen"/"ninety"/"five") — a truncated implementation
+    // that only reads the first entry would produce far fewer phones than this.
+    expect(result[0]?.phones.length).toBeGreaterThan(5);
+    for (const phone of result[0]?.phones ?? []) {
+      expect(HUPER_VALID_PHONES.has(phone)).toBe(true);
+    }
+  });
+
+  it("drops the literal 'undefined' phone and doesn't truncate for a non-ASCII/accented word", () => {
+    const result = g2p("naïve");
+
+    expect(result).toHaveLength(1);
+    expect(result[0]?.word).toBe("naïve");
+    expect(result[0]?.phones).not.toContain("undefined");
+    expect(result[0]?.phones.length).toBeGreaterThan(0);
+    for (const phone of result[0]?.phones ?? []) {
+      expect(HUPER_VALID_PHONES.has(phone)).toBe(true);
+    }
   });
 });
