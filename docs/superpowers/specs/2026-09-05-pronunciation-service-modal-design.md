@@ -12,10 +12,14 @@ plan"; this is that plan's design.
 
 ## Goals
 
-- Build `apps/pronunciation-service/`: a Modal-hosted, Python service running HuPER
-  (`huper29/huper_recognizer` + `huper29/huper_corrector`) that satisfies the HTTP contract already
-  fixed by the shipped TS adapter — `POST /score`, multipart (`audio`, `canonical_phones`) in,
-  `{"editOps": [...]}` out.
+- Build `apps/pronunciation-service/`: a Modal-hosted, Python service running the HuPER Corrector
+  (`huper29/huper_corrector`) that satisfies the HTTP contract already fixed by the shipped TS
+  adapter — `POST /score`, multipart (`audio`, `canonical_phones`) in, `{"editOps": [...]}` out.
+  The original 2026-09-04 spec's architecture assumed a two-stage pipeline (a separate
+  `huper29/huper_recognizer` pass producing "audio tokens" fed into the Corrector) — verified
+  against the actual model source (`correction/inference.py` in `github.com/HuPER29/HuPER`) to be
+  incorrect: `PhonemeCorrectionInference` loads its own HuBERT-based audio tokenizer internally and
+  takes a raw wav path directly. The Recognizer model isn't used by this service at all.
 - Close one real gap the original design left unresolved: an inserted phone (`op: "ins"`) has no
   canonical phone to report as `expectedPhoneme`, but that field is currently typed/stored as
   non-nullable `string`. Resolved here as a small, in-scope TS-side follow-up (see "TS-side
@@ -46,8 +50,8 @@ plan"; this is that plan's design.
 ```
 apps/pronunciation-service/
 ├── modal_app.py       # Modal app: image build, GPU config, secret, ASGI mount for /score
-├── models.py          # HuperModels: loads Recognizer + Corrector once per container
-├── pipeline.py         # pure functions: decode_audio, run_recognizer, run_corrector, to_edit_ops
+├── models.py          # HuperCorrector: loads PhonemeCorrectionInference once per container
+├── pipeline.py         # pure functions: decode_audio, run_corrector, to_edit_ops
 ├── schemas.py          # pydantic request/response models matching the fixed wire contract
 ├── tests/
 │   ├── test_pipeline.py # pytest: decode_audio for real, to_edit_ops against fake phone-op sequences
@@ -59,41 +63,59 @@ apps/pronunciation-service/
 Tests live under `tests/`, mirroring the package structure (the global Python convention), not
 colocated — the colocated `*.test.ts` pattern is TS-specific and doesn't apply here.
 
-`pipeline.py` has no Modal imports and no I/O beyond what's passed into its functions — it takes
-bytes/arrays/plain data structures and returns them, the same pure/adapter split already used on the
-TS side (`g2p.ts` is pure; `pronunciation.ts` is the vendor-call adapter). `modal_app.py` is the
+`pipeline.py` has no Modal imports — the only I/O it does is the audio decode (a temp WAV file) and
+the model call itself; everything else is plain data in, plain data out. This is the same
+pure/adapter split already used on the TS side (`g2p.ts` is pure; `pronunciation.ts` is the
+vendor-call adapter). `modal_app.py` is the
 thin layer: builds the image, loads models once via `@modal.enter()`, and exposes a FastAPI route
 under `@modal.asgi_app()` that does auth-check → parse → call into `pipeline.py` → map result to
 JSON, with no branching logic of its own beyond that.
 
 ## Model loading and inference pipeline
 
-`models.py`'s `HuperModels` holds both loaded models (Recognizer, Corrector), loaded once at
-container start and kept in GPU memory for the container's lifetime. Compute is a T4 GPU (per the
-original spec's cost model), `min_containers=0` so it scales to zero between sessions — preserved
-from the original spec's Fly-vs-Modal cost comparison. Checkpoints are downloaded from Hugging Face
-and baked into the container image at build time (not fetched at cold-start, and not using Modal's
+`models.py`'s `HuperCorrector` wraps a single loaded `PhonemeCorrectionInference` instance
+(`edit_seq_speech.inference.PhonemeCorrectionInference`, bundled inside the `huper29/huper_corrector`
+HF repo — imported by adding the downloaded repo dir to `sys.path`, per its own quickstart), loaded
+once at container start and kept resident for the container's lifetime. Compute is a T4 GPU (per
+the original spec's cost model), `min_containers=0` so it scales to zero between sessions —
+preserved from the original spec's Fly-vs-Modal cost comparison. The HF repo (checkpoint + bundled
+`edit_seq_speech` package + `vocab.json`) is downloaded via `huggingface_hub.snapshot_download` and
+baked into the container image at build time (not fetched at cold-start, and not using Modal's
 newer weight-snapshotting support) — slower deploys, predictable/simple cold starts, no runtime
-dependency on Hugging Face being reachable.
+dependency on Hugging Face being reachable. `PhonemeCorrectionInference(checkpoint_path, vocab_path)`
+auto-detects CUDA for `device` and defaults `audio_model_name` to its own bundled HuBERT-large
+tokenizer — neither needs overriding.
 
 `pipeline.py`, in call order:
 
-1. `decode_audio(webm_bytes: bytes) -> np.ndarray` — pipes the bytes through an `ffmpeg` subprocess
-   (installed in the image via `apt_install`) to produce 16kHz mono float32 PCM. `ffmpeg` over a
-   Python decoding library: it's what actually needs to handle whatever WebM/Opus quirks Deepgram's
-   recorder produces, and is trivial to reproduce/debug by running the same command locally.
-2. `run_recognizer(models, pcm) -> AudioTokens` — WavLM-Large CTC forward pass.
-3. `run_corrector(models, audio_tokens, canonical_phones: list[CanonicalWord]) -> list[PhoneEditOp]`
-   — per-phone `KEEP`/`DEL`/`SUB`/`INS` ops against the canonical sequence, per
-   `huper29/huper_corrector`'s existing interface.
-4. `to_edit_ops(phone_ops, canonical_phones) -> list[PronunciationEditOp]` — collapses phone-level
-   ops to the wire format. Every non-`KEEP` phone becomes one entry (`word`, `wordIndex` of the
-   canonical word it falls under, `op`, `expectedPhoneme`, `spokenPhoneme`); a word with two
-   deviating phones produces two entries sharing the same `word`/`wordIndex` — the TS side already
-   handles this (`toDetectedPronunciationErrors` in `session.ts` maps the array 1:1, no
-   dedup-by-word assumed). An `INS` op — a phone produced with no canonical counterpart — is
-   attributed to the nearest canonical word (the preceding word, or the first word for a leading
-   insertion) with `expectedPhoneme: null` (see "TS-side follow-up").
+1. `decode_audio(webm_bytes: bytes) -> Path` — pipes the bytes through an `ffmpeg` subprocess
+   (installed in the image via `apt_install`) to produce a 16kHz mono WAV file at a temp path.
+   `predict()` (next step) takes a wav path, not an in-memory array — writing the file ourselves at
+   the exact rate the model expects removes any question of whether its internal loader would
+   otherwise resample correctly. `ffmpeg` over a Python decoding library: it's what actually needs to
+   handle whatever WebM/Opus quirks Deepgram's recorder produces, and is trivial to reproduce/debug
+   by running the same command locally.
+2. `run_corrector(corrector, wav_path: Path, canonical_phones: list[CanonicalWord]) -> list[dict]` —
+   joins `canonical_phones`' phones into the space-separated ARPAbet string `predict()` expects,
+   calls `corrector.predict(str(wav_path), text)`, and returns `log` (discarding `final_phonemes`,
+   which nothing downstream needs). `log` is a list of dicts, one **per canonical phone position, in
+   the same order as `text`** — confirmed from `correction/inference.py` and the model's
+   `vocab.json`: `{"src": str, "op": "KEEP" | "DEL" | "SUB:<PHONE>" | "SUB:<PAD>", "ins": "<NONE>" |
+   "<PAD>" | "<PHONE>"}`. `SUB:<PAD>`/`<PAD>` are vocab padding artifacts, not real content — treated
+   as no-op/no-insertion if they ever appear on a real request (logged as a warning, not surfaced to
+   the caller).
+3. `to_edit_ops(log, canonical_phones) -> list[PronunciationEditOp]` — flattens `canonical_phones`
+   into one `(word, wordIndex)` per phone position (same order as the `text` fed to `predict`, so it
+   lines up with `log` 1:1) and walks both in lockstep. Per position: `op == "DEL"` → one entry
+   (`op="del"`, `expectedPhoneme=src`, `spokenPhoneme=None`); `op` starts with `"SUB:"` and isn't
+   `"SUB:<PAD>"` → one entry (`op="sub"`, `expectedPhoneme=src`, `spokenPhoneme=` the part after
+   `SUB:`); `op == "KEEP"` → no entry. Independently, `ins` not in `{"<NONE>", "NONE", "<PAD>"}` →
+   an *additional* entry (`op="ins"`, `expectedPhoneme=None`, `spokenPhoneme=ins`) attributed to that
+   same position's word — so a single position can contribute zero, one, or two wire entries (e.g. a
+   substitution *and* a trailing inserted vowel), and a word with deviations at multiple phone
+   positions naturally produces multiple entries sharing the same `word`/`wordIndex`. The TS side
+   already handles this (`toDetectedPronunciationErrors` in `session.ts` maps the array 1:1, no
+   dedup-by-word assumed).
 
 ## Request handling, auth, and error responses
 
@@ -121,6 +143,13 @@ The `/score` route:
 - **Tooling:** `uv` for deps/venv, `ruff check`/`ruff format`, `ty check`, `pytest` — applied here
   since the original spec explicitly left this repo's Python convention undecided ("no existing
   prior art to match").
+- **Pinned dependency versions** (current stable as of this plan; exact, no `^`/`~`, per the global
+  Python/dependency standard): `modal==1.5.5`, `fastapi==0.141.1`, `pydantic==2.13.5`,
+  `python-multipart==0.0.32`, `transformers==5.16.1`, `torch==2.14.0`,
+  `huggingface-hub==1.30.0`, `numpy==2.5.2`, `pytest==9.1.1`, `ruff==0.16.6`, `ty==0.0.78`.
+  `torchaudio` is deliberately not a dependency — the Recognizer quickstart used it for
+  load+resample, but this service never touches the Recognizer, and `decode_audio` already produces
+  a 16kHz mono WAV via `ffmpeg` directly.
 
 ## TS-side follow-up (in scope for this plan)
 
@@ -149,11 +178,13 @@ so widening the type is all that's required there.
 
 - `tests/test_pipeline.py`: `decode_audio` tested for real against a small fixture WebM clip (ffmpeg
   isn't a model — deterministic and cheap enough to exercise directly, not worth mocking).
-  `to_edit_ops` tested against hand-built fake `PhoneEditOp` sequences covering: a clean `SUB`, a
-  `DEL` (null `spokenPhoneme`), a leading `INS` (attributed to the first word, null
-  `expectedPhoneme`), and two deviations landing on the same word (two entries, same `wordIndex`).
-  `run_recognizer`/`run_corrector` get a thin call-through test only — there's nothing but a model
-  call to exercise until a real-model integration test exists (deferred, see Non-goals).
+  `to_edit_ops` tested against hand-built fake `log` lists (the confirmed `{"src", "op", "ins"}`
+  shape) covering: a clean `SUB:<PHONE>`, a `DEL` (null `spokenPhoneme`), an `ins` alongside a
+  `KEEP` (insertion with no accompanying sub/del at that position), a position producing both a
+  `SUB` and an `ins` (two entries from one position), two deviations landing on different positions
+  of the same word (two entries, same `wordIndex`), and a `SUB:<PAD>`/`<PAD>` position (produces no
+  entry). `run_corrector` gets a thin call-through test only — there's nothing but a model call to
+  exercise until a real-model integration test exists (deferred, see Non-goals).
 - `tests/test_schemas.py`: malformed `canonical_phones` JSON, missing audio part, wrong/missing auth
   token → expected `4xx`/`401`. Nothing here touches Modal's decorators or deploys anything;
   everything runs as plain pytest against `pipeline.py`/`schemas.py` directly.
@@ -161,10 +192,11 @@ so widening the type is all that's required there.
 
 ## Further notes
 
-- Real per-request latency (recognizer + corrector + ffmpeg decode + HTTP overhead, on an actual
-  cold and warm T4 container) hasn't been measured — the original spec's cost estimate padded 20x
-  to absorb this uncertainty. Worth getting real numbers once this is deployed, before any actual
-  cost commitment, per that spec's own "Further notes."
+- Real per-request latency (corrector inference + ffmpeg decode + HTTP overhead, on an actual cold
+  and warm T4 container) hasn't been measured — the original spec's cost estimate padded 20x to
+  absorb this uncertainty, and was itself based on a Recognizer-only timing spike that, per this
+  plan's finding, measured a model this service doesn't end up using. Worth getting real Corrector
+  numbers once this is deployed, before any actual cost commitment.
 - If cold starts turn out to matter in practice (multi-second-plus, disrupting the live-conversation
   flow this feeds), revisit Modal's memory-snapshotting support then, once its GPU-shape constraints
   have had more time to mature.
