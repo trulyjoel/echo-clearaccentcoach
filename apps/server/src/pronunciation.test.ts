@@ -1,0 +1,63 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { CanonicalWord } from "./g2p.js";
+import { getPronunciationProvider } from "./pronunciation.js";
+
+const SAMPLE_PHONES: CanonicalWord[] = [{ word: "like", phones: ["L", "AY", "K"] }];
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+}
+
+describe("HttpPronunciationProvider", () => {
+  const originalFetch = global.fetch;
+  const originalUrl = process.env["PRONUNCIATION_SERVICE_URL"];
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+    process.env["PRONUNCIATION_SERVICE_URL"] = originalUrl;
+  });
+
+  it("throws when PRONUNCIATION_SERVICE_URL is not configured", async () => {
+    delete process.env["PRONUNCIATION_SERVICE_URL"];
+
+    await expect(
+      getPronunciationProvider().scoreTurn(Buffer.from([1, 2, 3]), SAMPLE_PHONES),
+    ).rejects.toThrow("PRONUNCIATION_SERVICE_URL is required");
+  });
+
+  it("POSTs the audio and canonical phones as multipart form data and returns the edit ops", async () => {
+    process.env["PRONUNCIATION_SERVICE_URL"] = "https://pronunciation.example.test";
+    let capturedUrl: string | undefined;
+    let capturedForm: FormData | undefined;
+    global.fetch = vi.fn(async (url: string | URL, init?: RequestInit) => {
+      capturedUrl = String(url);
+      capturedForm = init?.body as FormData;
+      return jsonResponse({
+        editOps: [
+          { word: "like", wordIndex: 0, op: "sub", expectedPhoneme: "L", spokenPhoneme: "R" },
+        ],
+      });
+    }) as unknown as typeof fetch;
+
+    const result = await getPronunciationProvider().scoreTurn(Buffer.from([1, 2, 3]), SAMPLE_PHONES);
+
+    expect(capturedUrl).toBe("https://pronunciation.example.test/score");
+    expect(capturedForm?.get("canonical_phones")).toBe(JSON.stringify(SAMPLE_PHONES));
+    const audioPart = capturedForm?.get("audio");
+    expect(audioPart).toBeInstanceOf(Blob);
+    expect(result).toEqual([
+      { word: "like", wordIndex: 0, op: "sub", expectedPhoneme: "L", spokenPhoneme: "R" },
+    ]);
+  });
+
+  it("throws with the response status and body on a non-2xx response", async () => {
+    process.env["PRONUNCIATION_SERVICE_URL"] = "https://pronunciation.example.test";
+    global.fetch = vi.fn(
+      async () => new Response("model unavailable", { status: 503 }),
+    ) as unknown as typeof fetch;
+
+    await expect(
+      getPronunciationProvider().scoreTurn(Buffer.from([1, 2, 3]), SAMPLE_PHONES),
+    ).rejects.toThrow("503");
+  });
+});
