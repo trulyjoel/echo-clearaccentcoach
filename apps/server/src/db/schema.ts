@@ -1,4 +1,10 @@
-import { ERROR_CATEGORIES, L1_VALUES, PROFICIENCY_LEVELS, SESSION_END_REASONS } from "@kalli/types";
+import {
+  ERROR_CATEGORIES,
+  L1_VALUES,
+  PROFICIENCY_LEVELS,
+  PRONUNCIATION_EDIT_OPS,
+  SESSION_END_REASONS,
+} from "@kalli/types";
 import { boolean, integer, pgEnum, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
 
 export const l1Enum = pgEnum("l1", [...L1_VALUES]);
@@ -56,6 +62,20 @@ export const turnErrors = pgTable("turn_errors", {
   corrected: text("corrected").notNull(),
   explanation: text("explanation").notNull(),
   audioClipId: uuid("audio_clip_id").references(() => audioClips.id, { onDelete: "set null" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const pronunciationEditOpEnum = pgEnum("pronunciation_edit_op", [...PRONUNCIATION_EDIT_OPS]);
+
+export const turnPronunciationErrors = pgTable("turn_pronunciation_errors", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  turnId: uuid("turn_id")
+    .notNull()
+    .references(() => turns.id),
+  word: text("word").notNull(),
+  op: pronunciationEditOpEnum("op").notNull(),
+  expectedPhoneme: text("expected_phoneme").notNull(),
+  spokenPhoneme: text("spoken_phoneme"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

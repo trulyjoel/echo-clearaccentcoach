@@ -64,6 +64,13 @@
       "when": 1788495786254,
       "tag": "0008_black_maddog",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1788577676551,
+      "tag": "0009_dazzling_eternity",
+      "breakpoints": true
     }
   ]
 }
