@@ -49,7 +49,7 @@ plan"; this is that plan's design.
 
 ```
 apps/pronunciation-service/
-├── modal_app.py       # Modal app: image build, GPU config, secret, ASGI mount for /score
+├── modal_app.py       # Modal app: image build, GPU config, secret, fastapi_endpoint for /score
 ├── models.py          # HuperCorrector: loads PhonemeCorrectionInference once per container
 ├── pipeline.py         # pure functions: decode_audio, run_corrector, to_edit_ops
 ├── schemas.py          # pydantic request/response models matching the fixed wire contract
@@ -66,10 +66,11 @@ colocated — the colocated `*.test.ts` pattern is TS-specific and doesn't apply
 `pipeline.py` has no Modal imports — the only I/O it does is the audio decode (a temp WAV file) and
 the model call itself; everything else is plain data in, plain data out. This is the same
 pure/adapter split already used on the TS side (`g2p.ts` is pure; `pronunciation.ts` is the
-vendor-call adapter). `modal_app.py` is the
-thin layer: builds the image, loads models once via `@modal.enter()`, and exposes a FastAPI route
-under `@modal.asgi_app()` that does auth-check → parse → call into `pipeline.py` → map result to
-JSON, with no branching logic of its own beyond that.
+vendor-call adapter). `modal_app.py` is the thin layer: a single `@app.cls()` GPU class that loads
+the model once via `@modal.enter()`, with one `@modal.fastapi_endpoint(method="POST")` method
+(Modal's documented pattern for a class with exactly one HTTP route — a hand-built ASGI app would be
+pure overhead here) that does auth-check → parse → call into `pipeline.py` → map result to JSON,
+with no branching logic of its own beyond that.
 
 ## Model loading and inference pipeline
 
