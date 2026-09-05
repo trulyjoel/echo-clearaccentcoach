@@ -160,7 +160,9 @@ existing `| null` (which already means "no phone here" for a deletion):
 - `packages/types/src/index.ts`: `DetectedPronunciationError.expectedPhoneme: string` →
   `string | null`.
 - `apps/server/src/db/schema.ts`: `turnPronunciationErrors.expectedPhoneme` drops `.notNull()`; new
-  Drizzle migration, applied to `kalli_dev` and `kalli_test`.
+  Drizzle migration, applied to the local dev and test databases (`pnpm db:generate` then
+  `pnpm db:migrate`) — trivially safe since the table has zero rows in any environment today
+  (`PRONUNCIATION_SERVICE_URL` is unset and nothing has ever inserted into it).
 - `apps/server/src/pronunciation.ts`: `editOpSchema`'s `expectedPhoneme: z.string().max(50)` →
   `.nullable()`.
 - `apps/server/src/llm.ts`: `buildPronunciationErrorContext` currently interpolates
