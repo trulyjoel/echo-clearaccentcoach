@@ -134,7 +134,7 @@ export function detectAsrSmoothedDeviations(
   pronunciation cue.
 - Multiple prior transcripts flagging the same word position dedupe to a single
   `DetectedPronunciationError`.
-- Emits `{ word, wordIndex, op: "sub", expectedPhoneme, spokenPhoneme, source: "transcript_revision" }`
+- Emits `{ word, op: "sub", expectedPhoneme, spokenPhoneme, source: "transcript_revision" }`
   per surviving position.
 
 ## Data model
