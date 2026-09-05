@@ -177,6 +177,7 @@ describe("generateReply streaming", () => {
     const stream = provider.generateReply(
       [{ role: "user", content: "hi" }],
       [],
+      [],
       SAMPLE_SYSTEM_PROMPT,
     );
 
@@ -203,6 +204,7 @@ describe("generateReply prompt caching", () => {
         { role: "assistant", content: "hey there" },
         { role: "user", content: "how are you" },
       ],
+      [],
       [],
       SAMPLE_SYSTEM_PROMPT,
     );
@@ -233,6 +235,7 @@ describe("generateReply prompt caching", () => {
           explanation: "Singular countable nouns need an article.",
         },
       ],
+      [],
       SAMPLE_SYSTEM_PROMPT,
     );
 
@@ -249,7 +252,7 @@ describe("generateReply prompt caching", () => {
     process.env["ANTHROPIC_API_KEY"] = "test-key";
     const provider = getLLMProvider();
 
-    provider.generateReply([{ role: "user", content: "hi" }], [], SAMPLE_SYSTEM_PROMPT);
+    provider.generateReply([{ role: "user", content: "hi" }], [], [], SAMPLE_SYSTEM_PROMPT);
 
     const latestContent = (aiTestState.streamTextCalls.at(-1)?.messages?.[0]?.content ??
       []) as RecordedTextPart[];
@@ -260,7 +263,7 @@ describe("generateReply prompt caching", () => {
     process.env["ANTHROPIC_API_KEY"] = "test-key";
     const provider = getLLMProvider();
 
-    provider.generateReply([{ role: "user", content: "hi" }], [], SAMPLE_SYSTEM_PROMPT);
+    provider.generateReply([{ role: "user", content: "hi" }], [], [], SAMPLE_SYSTEM_PROMPT);
     const systemWithoutErrors = aiTestState.streamTextCalls.at(-1)?.system;
 
     provider.generateReply(
@@ -273,6 +276,7 @@ describe("generateReply prompt caching", () => {
           explanation: "Singular countable nouns need an article.",
         },
       ],
+      [],
       SAMPLE_SYSTEM_PROMPT,
     );
     const systemWithErrors = aiTestState.streamTextCalls.at(-1)?.system;
@@ -280,6 +284,55 @@ describe("generateReply prompt caching", () => {
     // If this ever diverges, the reply pass's cache breakpoint stops paying off — the errors
     // list must live in the message content (see the test above), never in `system`.
     expect(systemWithErrors).toBe(systemWithoutErrors);
+  });
+});
+
+describe("generateReply with pronunciation errors", () => {
+  it("includes a flagged pronunciation error in the prompt sent to the model", async () => {
+    aiTestState.streamTextCalls.length = 0;
+    const provider = getLLMProvider();
+
+    const stream = provider.generateReply(
+      [{ role: "user", content: "he rike it" }],
+      [],
+      [{ word: "like", op: "sub", expectedPhoneme: "L", spokenPhoneme: "R" }],
+      SAMPLE_SYSTEM_PROMPT,
+    );
+    for await (const _ of stream.textStream) {
+      // drain
+    }
+
+    const call = aiTestState.streamTextCalls.at(-1);
+    const lastMessage = call?.messages?.at(-1);
+    const content = lastMessage?.content;
+    expect(Array.isArray(content)).toBe(true);
+    const text = (content as { text: string }[]).map((part) => part.text).join("");
+    expect(text).toContain("like");
+    expect(text).toContain("L");
+    expect(text).toContain("R");
+  });
+
+  it("omits the pronunciation-error block when the list is empty", async () => {
+    aiTestState.streamTextCalls.length = 0;
+    const provider = getLLMProvider();
+
+    const stream = provider.generateReply(
+      [{ role: "user", content: "he likes it" }],
+      [],
+      [],
+      SAMPLE_SYSTEM_PROMPT,
+    );
+    for await (const _ of stream.textStream) {
+      // drain
+    }
+
+    const call = aiTestState.streamTextCalls.at(-1);
+    const lastMessage = call?.messages?.at(-1);
+    const content = lastMessage?.content;
+    const text = Array.isArray(content)
+      ? (content as { text: string }[]).map((p) => p.text).join("")
+      : "";
+    expect(text).not.toContain("Flagged pronunciation");
   });
 });
 
@@ -299,7 +352,7 @@ describe("per-pass model selection", () => {
     const provider = getLLMProvider();
 
     await provider.analyzeErrors("she go to school", "spanish");
-    await provider.generateReply([{ role: "user", content: "hi" }], [], SAMPLE_SYSTEM_PROMPT);
+    await provider.generateReply([{ role: "user", content: "hi" }], [], [], SAMPLE_SYSTEM_PROMPT);
 
     expect(aiTestState.generateObjectCalls.at(-1)?.model).toEqual({
       __modelId: "claude-haiku-4-5-20251001",
@@ -314,7 +367,7 @@ describe("per-pass model selection", () => {
     const provider = getLLMProvider();
 
     await provider.analyzeErrors("she go to school", "spanish");
-    await provider.generateReply([{ role: "user", content: "hi" }], [], SAMPLE_SYSTEM_PROMPT);
+    await provider.generateReply([{ role: "user", content: "hi" }], [], [], SAMPLE_SYSTEM_PROMPT);
 
     expect(aiTestState.generateObjectCalls.at(-1)?.model).toEqual({
       __modelId: "custom-analysis-model",
@@ -342,7 +395,7 @@ describe("output token limits", () => {
     process.env["ANTHROPIC_API_KEY"] = "test-key";
     const provider = getLLMProvider();
 
-    await provider.generateReply([{ role: "user", content: "hi" }], [], SAMPLE_SYSTEM_PROMPT);
+    await provider.generateReply([{ role: "user", content: "hi" }], [], [], SAMPLE_SYSTEM_PROMPT);
 
     expect(aiTestState.streamTextCalls.at(-1)?.maxOutputTokens).toBeTypeOf("number");
   });

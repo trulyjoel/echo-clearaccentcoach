@@ -1,6 +1,12 @@
 import { createAnthropic } from "@ai-sdk/anthropic";
 import type { AnthropicProvider } from "@ai-sdk/anthropic";
-import type { DetectedError, L1, ProficiencyLevel, SupportedL1 } from "@kalli/types";
+import type {
+  DetectedError,
+  DetectedPronunciationError,
+  L1,
+  ProficiencyLevel,
+  SupportedL1,
+} from "@kalli/types";
 import { ERROR_CATEGORIES } from "@kalli/types";
 import type { ModelMessage } from "ai";
 import { generateObject, streamText } from "ai";
@@ -42,6 +48,7 @@ export interface LLMProvider {
   generateReply(
     history: ConversationMessage[],
     errors: DetectedError[],
+    pronunciationErrors: DetectedPronunciationError[],
     systemPrompt: string,
   ): ReplyStream;
 }
@@ -176,10 +183,11 @@ export function buildReplySystemPrompt(profile: ReplyProfile): string {
     "pace for advanced.";
   return (
     `${KALLI_SYSTEM_PROMPT}\n\n${personalization}\n\n` +
-    "If the learner's last message had flagged grammar errors, they're listed after the message " +
-    "below. Pick the single most relevant one and weave a brief, natural spoken correction into " +
-    "your reply — don't list every error or lecture. If none are listed, reply naturally with no " +
-    `correction.\n\n${NO_ERROR_EXAMPLE}\n${ERROR_PRESENT_EXAMPLES}\n\n${EMPHASIS_INSTRUCTION}`
+    "If the learner's last message had flagged grammar or pronunciation errors, they're listed " +
+    "after the message below. Pick the single most relevant one — from either list — and weave " +
+    "a brief, natural spoken correction into your reply — don't list every error or lecture. If " +
+    `none are listed, reply naturally with no correction.\n\n${NO_ERROR_EXAMPLE}\n` +
+    `${ERROR_PRESENT_EXAMPLES}\n\n${EMPHASIS_INSTRUCTION}`
   );
 }
 
@@ -197,6 +205,25 @@ function buildErrorContext(errors: DetectedError[]): string {
     )
     .join("\n");
   return `\n\nFlagged errors in the message above:\n${errorList}`;
+}
+
+/**
+ * Formats the current turn's detected pronunciation errors as a trailing block, analogous to
+ * `buildErrorContext` for grammar errors — appended after the transcript, not into the system
+ * prompt, since this also varies turn to turn. Returns "" when there's nothing to flag.
+ */
+function buildPronunciationErrorContext(errors: DetectedPronunciationError[]): string {
+  if (errors.length === 0) return "";
+  const errorList = errors
+    .map((error) => {
+      const spoken = error.spokenPhoneme ?? "(nothing)";
+      return (
+        `- "${error.word}": expected /${error.expectedPhoneme}/, said /${spoken}/ ` +
+        `(${error.op})`
+      );
+    })
+    .join("\n");
+  return `\n\nFlagged pronunciation errors in the message above:\n${errorList}`;
 }
 
 function getApiKey(): string {
@@ -256,12 +283,14 @@ const REPLY_MAX_OUTPUT_TOKENS = 400;
 function toCacheableMessages(
   history: ConversationMessage[],
   errors: DetectedError[],
+  pronunciationErrors: DetectedPronunciationError[],
 ): ModelMessage[] {
   const priorTurns = history.slice(0, -1);
   const currentTurn = history.at(-1);
   if (!currentTurn) return priorTurns;
 
-  const errorContext = buildErrorContext(errors);
+  const errorContext =
+    buildErrorContext(errors) + buildPronunciationErrorContext(pronunciationErrors);
   const content = [
     {
       type: "text" as const,
@@ -291,13 +320,14 @@ class AnthropicLLMProvider implements LLMProvider {
   generateReply(
     history: ConversationMessage[],
     errors: DetectedError[],
+    pronunciationErrors: DetectedPronunciationError[],
     systemPrompt: string,
   ): ReplyStream {
     const model = getReplyModelId();
     const result = streamText({
       model: getClient()(model),
       system: systemPrompt,
-      messages: toCacheableMessages(history, errors),
+      messages: toCacheableMessages(history, errors, pronunciationErrors),
       maxOutputTokens: REPLY_MAX_OUTPUT_TOKENS,
     });
     const usage = Promise.resolve(result.usage).then(toTokenUsage);
