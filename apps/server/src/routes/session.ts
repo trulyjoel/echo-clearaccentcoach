@@ -111,6 +111,81 @@ function toDetectedPronunciationErrors(
   }));
 }
 
+type TurnAnalysis =
+  | { failed: true }
+  | {
+      failed: false;
+      errors: DetectedError[];
+      analysisUsage: TokenUsage;
+      analysisModel: string;
+      pronunciationErrors: DetectedPronunciationError[];
+    };
+
+/**
+ * Runs pass 1 (grammar-error analysis) and pronunciation scoring concurrently. A grammar-analysis
+ * failure aborts the turn (`failed: true`); a pronunciation-scoring failure degrades to an empty
+ * pronunciation-error list instead, since it's the newer, less-proven pass — deliberately
+ * asymmetric handling of the two `Promise.allSettled` branches.
+ */
+async function analyzeTurn(
+  transcript: string,
+  l1: L1,
+  audio: Buffer,
+  log: FastifyBaseLogger,
+): Promise<TurnAnalysis> {
+  const canonicalPhones = g2p(transcript);
+  const [analysisResult, pronunciationResult] = await Promise.allSettled([
+    getLLMProvider().analyzeErrors(transcript, l1),
+    getPronunciationProvider().scoreTurn(audio, canonicalPhones),
+  ]);
+
+  if (analysisResult.status === "rejected") {
+    log.error(analysisResult.reason, "Failed to analyze errors");
+    return { failed: true };
+  }
+
+  let pronunciationErrors: DetectedPronunciationError[] = [];
+  if (pronunciationResult.status === "fulfilled") {
+    pronunciationErrors = toDetectedPronunciationErrors(pronunciationResult.value);
+  } else {
+    log.error(pronunciationResult.reason, "Failed to score pronunciation");
+  }
+
+  const analysis = analysisResult.value;
+  return {
+    failed: false,
+    errors: analysis.errors,
+    analysisUsage: analysis.usage,
+    analysisModel: analysis.model,
+    pronunciationErrors,
+  };
+}
+
+/** Sends the turn's `turn_errors` and/or `turn_pronunciation_errors` messages, one per detected
+ * category, skipping either one the turn had nothing to report for. */
+function sendTurnErrorMessages(
+  send: (message: ServerToClientMessage) => void,
+  persistedTurn: PersistedTurn,
+  hasClip: boolean,
+): void {
+  if (persistedTurn.errors.length > 0) {
+    send({
+      type: "turn_errors",
+      turnId: persistedTurn.id,
+      createdAt: persistedTurn.createdAt.toISOString(),
+      errors: persistedTurn.errors.map((error) => ({ ...error, hasClip })),
+    });
+  }
+  if (persistedTurn.pronunciationErrors.length > 0) {
+    send({
+      type: "turn_pronunciation_errors",
+      turnId: persistedTurn.id,
+      createdAt: persistedTurn.createdAt.toISOString(),
+      errors: persistedTurn.pronunciationErrors,
+    });
+  }
+}
+
 /** Persists a turn and its detected grammar/pronunciation errors together in one transaction. */
 async function persistTurn(
   sessionId: string,
@@ -559,26 +634,12 @@ export function registerSessionRoutes(app: FastifyInstance): void {
           }
           conversationHistory.push({ role: "user", content: transcript });
 
-          const canonicalPhones = g2p(transcript);
-          const [analysisResult, pronunciationResult] = await Promise.allSettled([
-            getLLMProvider().analyzeErrors(transcript, resolvedL1),
-            getPronunciationProvider().scoreTurn(audio, canonicalPhones),
-          ]);
-
-          if (analysisResult.status === "rejected") {
-            request.log.error(analysisResult.reason, "Failed to analyze errors");
+          const analysis = await analyzeTurn(transcript, resolvedL1, audio, request.log);
+          if (analysis.failed) {
             if (!ended) send({ type: "error", message: "Could not analyze your speech" });
             return;
           }
-          const analysis = analysisResult.value;
-          const errors = analysis.errors;
-
-          let pronunciationErrors: DetectedPronunciationError[] = [];
-          if (pronunciationResult.status === "fulfilled") {
-            pronunciationErrors = toDetectedPronunciationErrors(pronunciationResult.value);
-          } else {
-            request.log.error(pronunciationResult.reason, "Failed to score pronunciation");
-          }
+          const { errors, pronunciationErrors, analysisUsage, analysisModel } = analysis;
           if (aborted()) return;
 
           const result = await streamReplyWithPipelinedTTS(errors, pronunciationErrors, aborted);
@@ -591,9 +652,9 @@ export function registerSessionRoutes(app: FastifyInstance): void {
           // The vendor calls already ran and were billed regardless of what happens next (abort,
           // persistence failure), so token usage is recorded unconditionally here.
           await recordUsage(sessionId, {
-            analysisInputTokens: analysis.usage.inputTokens,
-            analysisOutputTokens: analysis.usage.outputTokens,
-            analysisModel: analysis.model,
+            analysisInputTokens: analysisUsage.inputTokens,
+            analysisOutputTokens: analysisUsage.outputTokens,
+            analysisModel,
             replyInputTokens: usage.inputTokens,
             replyOutputTokens: usage.outputTokens,
             replyModel,
@@ -625,22 +686,7 @@ export function registerSessionRoutes(app: FastifyInstance): void {
             request.log,
           );
           if (aborted()) return;
-          if (hasErrors) {
-            send({
-              type: "turn_errors",
-              turnId: persistedTurn.id,
-              createdAt: persistedTurn.createdAt.toISOString(),
-              errors: persistedTurn.errors.map((error) => ({ ...error, hasClip })),
-            });
-          }
-          if (persistedTurn.pronunciationErrors.length > 0) {
-            send({
-              type: "turn_pronunciation_errors",
-              turnId: persistedTurn.id,
-              createdAt: persistedTurn.createdAt.toISOString(),
-              errors: persistedTurn.pronunciationErrors,
-            });
-          }
+          sendTurnErrorMessages(send, persistedTurn, hasClip);
           send({ type: "reply_text", text: replyText });
 
           pendingAudio = undefined;
