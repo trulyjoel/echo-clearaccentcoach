@@ -36,8 +36,12 @@ foundation and offers no reason to expect it avoids the same bias.
   panel. A separate structured drill/practice mode is worth building later but is not this spec.
 - Add no serial latency to the existing pipeline beyond whichever of the two analysis passes
   (grammar, pronunciation) is slower — they run concurrently, not sequentially.
-- Keep vendor/inference cost negligible relative to the existing ~$0.24/session (Deepgram +
-  ElevenLabs + Claude) baseline.
+- Keep vendor/inference cost negligible relative to the existing per-session baseline (Deepgram +
+  Inworld + Claude — the MVP spec's original ~$0.24/session figure was modeled against ElevenLabs;
+  Inworld replaced it per the since-completed TTS vendor swap, at materially lower per-character
+  cost, per `apps/server/src/tts.ts`'s own pricing note (~$5–15/1M characters on Inworld's Flash
+  tier). Not re-modeled here — the pronunciation feature's own cost is negligible against either
+  figure).
 
 ## Non-goals
 
@@ -133,7 +137,8 @@ where a real deployment would use FP16) measured 52–186ms per turn (3–10s of
 real-time factor of ~0.017–0.019. At Modal's T4 rate ($0.000164/sec) and the spec's baseline of ~10
 turns/session, that's on the order of **$0.0001–0.0003/session** for the recognizer pass alone —
 even padding 20x for the unbenchmarked Corrector pass, cold-start amortization, and HTTP overhead,
-it stays around $0.002–0.006/session, negligible against the existing ~$0.24/session baseline.
+it stays around $0.002–0.006/session, negligible against the existing Deepgram + Inworld + Claude
+per-session baseline regardless of its exact current figure (see Goals).
 
 `apps/server/src/pronunciation.ts` (new) is the vendor adapter, matching `deepgram.ts`/`llm.ts`/
 `tts.ts`'s existing shape exactly — typed interface, lazy singleton, factory function callers
