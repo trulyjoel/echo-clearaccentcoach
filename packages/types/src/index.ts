@@ -65,8 +65,14 @@ export const PRONUNCIATION_EDIT_OPS = ["sub", "del", "ins"] as const;
 
 export type PronunciationEditOpKind = (typeof PRONUNCIATION_EDIT_OPS)[number];
 
+export const PRONUNCIATION_ERROR_SOURCES = ["audio", "transcript_revision"] as const;
+
+export type PronunciationErrorSource = (typeof PRONUNCIATION_ERROR_SOURCES)[number];
+
 /** One detected pronunciation deviation for a single word in a turn — e.g. a substituted phoneme
- * (an L2 /l/-for-/r/ swap), a dropped phoneme, or an inserted one. */
+ * (an L2 /l/-for-/r/ swap), a dropped phoneme, or an inserted one. `source` distinguishes HuPER's
+ * audio-verified detections from ones inferred purely from Flux revising its own transcript
+ * mid-turn (see docs/superpowers/specs/2026-09-05-flux-transcript-revision-detection-design.md). */
 export interface DetectedPronunciationError {
   word: string;
   op: PronunciationEditOpKind;
@@ -74,6 +80,7 @@ export interface DetectedPronunciationError {
   /** The phoneme actually realized in the audio, or `null` for a deletion (nothing was spoken in
    * its place). */
   spokenPhoneme: string | null;
+  source: PronunciationErrorSource;
 }
 
 /** A `DetectedPronunciationError` once persisted, addressable for the correction panel. */
