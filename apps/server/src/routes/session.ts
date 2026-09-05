@@ -28,6 +28,7 @@ import { startOnboarding, submitAnswer, submitConfirmation } from "../onboarding
 import { containsDisallowedContent } from "../outputGuard.js";
 import type { PronunciationEditOp } from "../pronunciation.js";
 import { getPronunciationProvider } from "../pronunciation.js";
+import { detectAsrSmoothedDeviations } from "../pronunciationRevisionDetector.js";
 import { getMaxSessionDurationMs, hasReachedDailySessionCap } from "../sessionLimits.js";
 import { splitSentences } from "../sentenceSplitter.js";
 import { getTTSProvider } from "../tts.js";
@@ -108,6 +109,7 @@ function toDetectedPronunciationErrors(
     op,
     expectedPhoneme,
     spokenPhoneme,
+    source: "audio",
   }));
 }
 
@@ -131,6 +133,7 @@ async function analyzeTurn(
   transcript: string,
   l1: L1,
   audio: Buffer,
+  priorTranscripts: string[],
   log: FastifyBaseLogger,
 ): Promise<TurnAnalysis> {
   const canonicalPhones = g2p(transcript);
@@ -150,6 +153,10 @@ async function analyzeTurn(
   } else {
     log.error(pronunciationResult.reason, "Failed to score pronunciation");
   }
+  pronunciationErrors = [
+    ...pronunciationErrors,
+    ...detectAsrSmoothedDeviations(transcript, priorTranscripts),
+  ];
 
   const analysis = analysisResult.value;
   return {
@@ -228,6 +235,7 @@ async function persistTurn(
         op: row.op,
         expectedPhoneme: row.expectedPhoneme,
         spokenPhoneme: row.spokenPhoneme,
+        source: row.source,
       }));
     }
     return {
@@ -343,6 +351,11 @@ export function registerSessionRoutes(app: FastifyInstance): void {
 
       const conversationHistory: ConversationMessage[] = [];
       let turnAudioChunks: Buffer[] = [];
+      /** Every distinct transcript Flux has emitted for the turn in progress, in order — lets a
+       * later `EndOfTurn` be compared against what Flux hypothesized before it settled (see
+       * docs/superpowers/specs/2026-09-05-flux-transcript-revision-detection-design.md). Reset at
+       * `StartOfTurn` and after `EndOfTurn` consumes it. */
+      let turnTranscriptHistory: string[] = [];
       // The client records with a single MediaRecorder for the whole session, so only the very
       // first chunk it ever emits carries the WebM/Opus container header (EBML + Segment +
       // Tracks) — every later chunk is a headerless fragment, only meaningful appended after that
@@ -610,7 +623,11 @@ export function registerSessionRoutes(app: FastifyInstance): void {
       }
 
       /** Runs the LLM reply + TTS pipeline for one finished user turn. */
-      async function handleTurn(transcript: string, audio: Buffer): Promise<void> {
+      async function handleTurn(
+        transcript: string,
+        audio: Buffer,
+        priorTranscripts: string[],
+      ): Promise<void> {
         if (activeTurn) return;
         const myTurn: ActiveTurn = { interrupted: false };
         activeTurn = myTurn;
@@ -634,7 +651,13 @@ export function registerSessionRoutes(app: FastifyInstance): void {
           }
           conversationHistory.push({ role: "user", content: transcript });
 
-          const analysis = await analyzeTurn(transcript, resolvedL1, audio, request.log);
+          const analysis = await analyzeTurn(
+            transcript,
+            resolvedL1,
+            audio,
+            priorTranscripts,
+            request.log,
+          );
           if (analysis.failed) {
             if (!ended) send({ type: "error", message: "Could not analyze your speech" });
             return;
@@ -849,6 +872,7 @@ export function registerSessionRoutes(app: FastifyInstance): void {
         // latency, instead of clipping the first fraction-second of actual speech.
         if (data.event === "StartOfTurn") {
           turnAudioChunks = [...preRollChunks];
+          turnTranscriptHistory = [];
           if (activeTurn || replyPlaying) {
             if (activeTurn) {
               activeTurn.interrupted = true;
@@ -869,14 +893,21 @@ export function registerSessionRoutes(app: FastifyInstance): void {
               ? Buffer.concat(turnAudioChunks)
               : Buffer.concat([webmHeaderChunk, ...turnAudioChunks]);
           turnAudioChunks = [];
+          const priorTranscripts = turnTranscriptHistory;
+          turnTranscriptHistory = [];
           if (data.transcript) {
             if (onboardingFlowState) void handleOnboardingTurn(data.transcript);
-            else void handleTurn(data.transcript, turnAudio);
+            else void handleTurn(data.transcript, turnAudio, priorTranscripts);
           }
           return;
         }
 
-        if (data.transcript) send({ type: "transcript", text: data.transcript, isFinal: false });
+        if (data.transcript) {
+          send({ type: "transcript", text: data.transcript, isFinal: false });
+          if (turnTranscriptHistory.at(-1) !== data.transcript) {
+            turnTranscriptHistory.push(data.transcript);
+          }
+        }
       });
 
       deepgramConnection.on("error", handleTranscriptionError);

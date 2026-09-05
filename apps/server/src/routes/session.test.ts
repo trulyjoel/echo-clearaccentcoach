@@ -1343,7 +1343,7 @@ describe("pronunciation correction pipeline", () => {
 
     expect(pronunciationTestState.getScoreCalls()).toEqual([Buffer.from([1, 2, 3])]);
     expect(llmTestState.getReplyPronunciationErrorArgs()).toEqual([
-      [{ word: "like", op: "sub", expectedPhoneme: "L", spokenPhoneme: "R" }],
+      [{ word: "like", op: "sub", expectedPhoneme: "L", spokenPhoneme: "R", source: "audio" }],
     ]);
 
     ws.terminate();
@@ -1392,6 +1392,7 @@ describe("pronunciation correction pipeline", () => {
             op: "sub",
             expectedPhoneme: "L",
             spokenPhoneme: "R",
+            source: "audio",
           },
         ],
       },
@@ -1472,6 +1473,117 @@ describe("pronunciation correction pipeline", () => {
     // analyzeErrors failure (which aborts the turn entirely).
     expect(llmTestState.getCalls()).toHaveLength(1);
     expect(llmTestState.getReplyPronunciationErrorArgs()).toEqual([[]]);
+
+    ws.terminate();
+    await app.close();
+  });
+
+  it("flags a mid-turn transcript revision as a pronunciation error", async () => {
+    await giveConsent();
+    pronunciationTestState.setScoreImpl(async () => []);
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    await queue.next(); // session_started
+    await drainSpokenLine(queue);
+
+    ws.send(Buffer.from([1, 2, 3]));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    emitStartOfTurn("I had a berry good day");
+    // The greeting's speakLine already set replyPlaying (it only clears on a client
+    // reply_playback_ended message, which this test never sends), so StartOfTurn's barge-in
+    // check fires here even though no turn is actively running.
+    await queue.next(); // reply_interrupted (barge_in)
+    await queue.next(); // transcript (isFinal: false, from StartOfTurn)
+    emitEndOfTurn("I had a very good day");
+    await queue.next(); // transcript (isFinal: true)
+    await queue.next(); // end_of_turn
+    await queue.next(); // reply_text_delta
+    await queue.next(); // audio chunk
+    await queue.next(); // audio chunk
+
+    const pronunciationFrame = await queue.next();
+    expect(pronunciationFrame).toEqual({
+      kind: "json",
+      message: {
+        type: "turn_pronunciation_errors",
+        turnId: expect.any(String),
+        createdAt: expect.any(String),
+        errors: [
+          {
+            id: expect.any(String),
+            word: "very",
+            op: "sub",
+            expectedPhoneme: "V",
+            spokenPhoneme: "B",
+            source: "transcript_revision",
+          },
+        ],
+      },
+    });
+    await queue.next(); // reply_text
+    await queue.next(); // reply_audio_end
+
+    ws.terminate();
+    await app.close();
+  });
+
+  it("does not leak a completed turn's transcript history into the next turn", async () => {
+    await giveConsent();
+    pronunciationTestState.setScoreImpl(async () => []);
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    await queue.next(); // session_started
+    await drainSpokenLine(queue);
+
+    ws.send(Buffer.from([1, 2, 3]));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    emitStartOfTurn("I had a berry good day");
+    // The greeting's speakLine already set replyPlaying (it only clears on a client
+    // reply_playback_ended message, which this test never sends), so StartOfTurn's barge-in
+    // check fires here even though no turn is actively running.
+    await queue.next(); // reply_interrupted (barge_in)
+    await queue.next(); // transcript
+    emitEndOfTurn("I had a very good day");
+    await queue.next(); // transcript
+    await queue.next(); // end_of_turn
+    await queue.next(); // reply_text_delta
+    await queue.next(); // audio chunk
+    await queue.next(); // audio chunk
+    await queue.next(); // turn_pronunciation_errors
+    await queue.next(); // reply_text
+    await queue.next(); // reply_audio_end
+
+    emitEndOfTurn("I had a very good day");
+    await queue.next(); // transcript
+    await queue.next(); // end_of_turn
+    await queue.next(); // reply_text_delta
+    await queue.next(); // audio chunk
+    await queue.next(); // audio chunk
+    await queue.next(); // reply_text — no turn_pronunciation_errors frame this time
+    await queue.next(); // reply_audio_end
+
+    expect(llmTestState.getReplyPronunciationErrorArgs()).toEqual([
+      [
+        {
+          word: "very",
+          op: "sub",
+          expectedPhoneme: "V",
+          spokenPhoneme: "B",
+          source: "transcript_revision",
+        },
+      ],
+      [],
+    ]);
 
     ws.terminate();
     await app.close();
