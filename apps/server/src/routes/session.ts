@@ -1,8 +1,10 @@
 import type {
   ClientToServerMessage,
   DetectedError,
+  DetectedPronunciationError,
   L1,
   PersistedError,
+  PersistedPronunciationError,
   ProficiencyLevel,
   ServerToClientMessage,
   SessionEndReason,
@@ -13,16 +15,19 @@ import { AsyncQueue } from "../asyncQueue.js";
 import { storeTurnClip } from "../audioClips.js";
 import { getAuthenticatedUserId } from "../auth.js";
 import { db } from "../db/client.js";
-import { profiles, sessions, turnErrors, turns } from "../db/schema.js";
+import { profiles, sessions, turnErrors, turnPronunciationErrors, turns } from "../db/schema.js";
 import type { DeepgramConnection } from "../deepgram.js";
 import { DEEPGRAM_MODEL, openDeepgramConnection } from "../deepgram.js";
 import { createMarkerResolver } from "../emphasisMarkers.js";
-import type { AnalysisResult, ConversationMessage, TokenUsage } from "../llm.js";
+import { g2p } from "../g2p.js";
+import type { ConversationMessage, TokenUsage } from "../llm.js";
 import { buildReplySystemPrompt, getAnalysisModelId, getLLMProvider, pickGreeting } from "../llm.js";
 import { extractOnboardingAnswer, extractOnboardingConfirmation } from "../onboarding/extract.js";
 import type { OnboardingResult, OnboardingState } from "../onboarding/flow.js";
 import { startOnboarding, submitAnswer, submitConfirmation } from "../onboarding/flow.js";
 import { containsDisallowedContent } from "../outputGuard.js";
+import type { PronunciationEditOp } from "../pronunciation.js";
+import { getPronunciationProvider } from "../pronunciation.js";
 import { getMaxSessionDurationMs, hasReachedDailySessionCap } from "../sessionLimits.js";
 import { splitSentences } from "../sentenceSplitter.js";
 import { getTTSProvider } from "../tts.js";
@@ -90,14 +95,29 @@ interface PersistedTurn {
   createdAt: Date;
   /** `hasClip` is always false here — it's only known once `maybeStoreClip` runs afterward. */
   errors: PersistedError[];
+  pronunciationErrors: PersistedPronunciationError[];
 }
 
-/** Persists a turn and its detected errors together in one transaction. */
+/** Converts the wire-shaped `PronunciationEditOp` (has `wordIndex`, not needed downstream) into
+ * the persistence/prompt-shaped `DetectedPronunciationError`. */
+function toDetectedPronunciationErrors(
+  editOps: PronunciationEditOp[],
+): DetectedPronunciationError[] {
+  return editOps.map(({ word, op, expectedPhoneme, spokenPhoneme }) => ({
+    word,
+    op,
+    expectedPhoneme,
+    spokenPhoneme,
+  }));
+}
+
+/** Persists a turn and its detected grammar/pronunciation errors together in one transaction. */
 async function persistTurn(
   sessionId: string,
   transcript: string,
   replyText: string,
   errors: DetectedError[],
+  pronunciationErrors: DetectedPronunciationError[],
 ): Promise<PersistedTurn> {
   return db.transaction(async (tx) => {
     const [turn] = await tx
@@ -121,7 +141,26 @@ async function persistTurn(
         bookmarked: false,
       }));
     }
-    return { id: turn.id, createdAt: turn.createdAt, errors: persistedErrors };
+    let persistedPronunciationErrors: PersistedPronunciationError[] = [];
+    if (pronunciationErrors.length > 0) {
+      const inserted = await tx
+        .insert(turnPronunciationErrors)
+        .values(pronunciationErrors.map((error) => ({ turnId: turn.id, ...error })))
+        .returning();
+      persistedPronunciationErrors = inserted.map((row) => ({
+        id: row.id,
+        word: row.word,
+        op: row.op,
+        expectedPhoneme: row.expectedPhoneme,
+        spokenPhoneme: row.spokenPhoneme,
+      }));
+    }
+    return {
+      id: turn.id,
+      createdAt: turn.createdAt,
+      errors: persistedErrors,
+      pronunciationErrors: persistedPronunciationErrors,
+    };
   });
 }
 
@@ -353,6 +392,7 @@ export function registerSessionRoutes(app: FastifyInstance): void {
        */
       async function streamReplyWithPipelinedTTS(
         errors: DetectedError[],
+        pronunciationErrors: DetectedPronunciationError[],
         aborted: () => boolean,
       ): Promise<
         | { textFailed: true }
@@ -375,6 +415,7 @@ export function registerSessionRoutes(app: FastifyInstance): void {
         const replyStream = getLLMProvider().generateReply(
           [...conversationHistory],
           errors,
+          pronunciationErrors,
           resolvedSystemPrompt,
         );
         const sentenceQueue = new AsyncQueue<{ text: string; highQuality: boolean }>();
@@ -518,18 +559,29 @@ export function registerSessionRoutes(app: FastifyInstance): void {
           }
           conversationHistory.push({ role: "user", content: transcript });
 
-          let analysis: AnalysisResult;
-          try {
-            analysis = await getLLMProvider().analyzeErrors(transcript, resolvedL1);
-          } catch (error) {
-            request.log.error(error, "Failed to analyze errors");
+          const canonicalPhones = g2p(transcript);
+          const [analysisResult, pronunciationResult] = await Promise.allSettled([
+            getLLMProvider().analyzeErrors(transcript, resolvedL1),
+            getPronunciationProvider().scoreTurn(audio, canonicalPhones),
+          ]);
+
+          if (analysisResult.status === "rejected") {
+            request.log.error(analysisResult.reason, "Failed to analyze errors");
             if (!ended) send({ type: "error", message: "Could not analyze your speech" });
             return;
           }
+          const analysis = analysisResult.value;
           const errors = analysis.errors;
+
+          let pronunciationErrors: DetectedPronunciationError[] = [];
+          if (pronunciationResult.status === "fulfilled") {
+            pronunciationErrors = toDetectedPronunciationErrors(pronunciationResult.value);
+          } else {
+            request.log.error(pronunciationResult.reason, "Failed to score pronunciation");
+          }
           if (aborted()) return;
 
-          const result = await streamReplyWithPipelinedTTS(errors, aborted);
+          const result = await streamReplyWithPipelinedTTS(errors, pronunciationErrors, aborted);
           if (result.textFailed) {
             sendPipelineFailure("Could not generate a reply");
             return;
@@ -551,7 +603,13 @@ export function registerSessionRoutes(app: FastifyInstance): void {
 
           let persistedTurn: PersistedTurn;
           try {
-            persistedTurn = await persistTurn(sessionId, transcript, replyText, errors);
+            persistedTurn = await persistTurn(
+              sessionId,
+              transcript,
+              replyText,
+              errors,
+              pronunciationErrors,
+            );
           } catch (error) {
             request.log.error(error, "Failed to persist turn");
             if (!ended) send({ type: "error", message: "Could not save this turn" });
@@ -573,6 +631,14 @@ export function registerSessionRoutes(app: FastifyInstance): void {
               turnId: persistedTurn.id,
               createdAt: persistedTurn.createdAt.toISOString(),
               errors: persistedTurn.errors.map((error) => ({ ...error, hasClip })),
+            });
+          }
+          if (persistedTurn.pronunciationErrors.length > 0) {
+            send({
+              type: "turn_pronunciation_errors",
+              turnId: persistedTurn.id,
+              createdAt: persistedTurn.createdAt.toISOString(),
+              errors: persistedTurn.pronunciationErrors,
             });
           }
           send({ type: "reply_text", text: replyText });

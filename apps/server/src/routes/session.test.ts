@@ -1,11 +1,26 @@
-import type { DetectedError, L1, ProficiencyLevel, ServerToClientMessage } from "@kalli/types";
+import type {
+  DetectedError,
+  DetectedPronunciationError,
+  L1,
+  ProficiencyLevel,
+  ServerToClientMessage,
+} from "@kalli/types";
 import { eq } from "drizzle-orm";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { db } from "../db/client.js";
-import { audioClips, profiles, sessions, turnErrors, turns, usageRecords } from "../db/schema.js";
+import {
+  audioClips,
+  profiles,
+  sessions,
+  turnErrors,
+  turnPronunciationErrors,
+  turns,
+  usageRecords,
+} from "../db/schema.js";
 import type { DeepgramConnection, DeepgramMessage, DeepgramTurnInfoMessage } from "../deepgram.js";
 import type { ConversationMessage } from "../llm.js";
+import type { PronunciationEditOp } from "../pronunciation.js";
 
 type InjectedWebSocket = Awaited<ReturnType<FastifyInstance["injectWS"]>>;
 
@@ -196,6 +211,7 @@ const llmTestState = vi.hoisted(() => {
   let replyUsage: TokenUsage = DEFAULT_REPLY_USAGE;
   const calls: ConversationMessage[][] = [];
   const replyErrorArgs: DetectedError[][] = [];
+  const replyPronunciationErrorArgs: DetectedPronunciationError[][] = [];
   const analyzeCalls: string[] = [];
   const analyzeL1Calls: L1[] = [];
 
@@ -207,6 +223,7 @@ const llmTestState = vi.hoisted(() => {
       replyUsage = DEFAULT_REPLY_USAGE;
       calls.length = 0;
       replyErrorArgs.length = 0;
+      replyPronunciationErrorArgs.length = 0;
       analyzeCalls.length = 0;
       analyzeL1Calls.length = 0;
     },
@@ -226,6 +243,7 @@ const llmTestState = vi.hoisted(() => {
     },
     getCalls: (): ConversationMessage[][] => calls,
     getReplyErrorArgs: (): DetectedError[][] => replyErrorArgs,
+    getReplyPronunciationErrorArgs: (): DetectedPronunciationError[][] => replyPronunciationErrorArgs,
     getAnalyzeCalls: (): string[] => analyzeCalls,
     getAnalyzeL1Calls: (): L1[] => analyzeL1Calls,
     analysisModel: MOCK_ANALYSIS_MODEL,
@@ -242,9 +260,14 @@ const llmTestState = vi.hoisted(() => {
       // delta once `replyImpl`'s promise settles, which every fixture's reply text (a single
       // short sentence, no embedded sentence breaks) still resolves to exactly one TTS call —
       // the same shape the pre-streaming tests asserted against.
-      generateReply: (history: ConversationMessage[], errors: DetectedError[]) => {
+      generateReply: (
+        history: ConversationMessage[],
+        errors: DetectedError[],
+        pronunciationErrors: DetectedPronunciationError[],
+      ) => {
         calls.push(history);
         replyErrorArgs.push(errors);
+        replyPronunciationErrorArgs.push(pronunciationErrors);
         const textPromise = replyImpl(history, errors);
         async function* textStream(): AsyncGenerator<string> {
           yield await textPromise;
@@ -259,6 +282,32 @@ const llmTestState = vi.hoisted(() => {
     })),
   };
 });
+
+const pronunciationTestState = vi.hoisted(() => {
+  let scoreImpl: (audio: Buffer) => Promise<PronunciationEditOp[]> = async () => [];
+  const scoreCalls: Buffer[] = [];
+
+  return {
+    reset: (): void => {
+      scoreImpl = async () => [];
+      scoreCalls.length = 0;
+    },
+    setScoreImpl: (fn: (audio: Buffer) => Promise<PronunciationEditOp[]>): void => {
+      scoreImpl = fn;
+    },
+    getScoreCalls: (): Buffer[] => scoreCalls,
+    getPronunciationProvider: vi.fn(() => ({
+      scoreTurn: async (audio: Buffer) => {
+        scoreCalls.push(audio);
+        return scoreImpl(audio);
+      },
+    })),
+  };
+});
+
+vi.mock("../pronunciation.js", () => ({
+  getPronunciationProvider: pronunciationTestState.getPronunciationProvider,
+}));
 
 const greetingTestState = vi.hoisted(() => {
   let greeting = "Hi, I'm Kalli!";
@@ -464,11 +513,13 @@ const AUTH_HEADERS = { headers: { authorization: "Bearer test-user-session-456" 
 afterEach(async () => {
   deepgramTestState.setShouldFail(false);
   llmTestState.reset();
+  pronunciationTestState.reset();
   greetingTestState.reset();
   ttsTestState.reset();
   storageTestState.reset();
   onboardingExtractTestState.reset();
   await db.delete(turnErrors);
+  await db.delete(turnPronunciationErrors);
   await db.delete(turns);
   await db.delete(usageRecords);
   await db.delete(audioClips);
@@ -1256,6 +1307,171 @@ describe("two-pass correction pipeline", () => {
     const [row] = await db.select().from(sessions).where(eq(sessions.id, sessionId));
     expect(row?.endedAt).toBeNull();
     expect(await db.select().from(turns).where(eq(turns.sessionId, sessionId))).toHaveLength(0);
+
+    ws.terminate();
+    await app.close();
+  });
+});
+
+describe("pronunciation correction pipeline", () => {
+  it("sends the turn's audio to scoreTurn and its output into generateReply", async () => {
+    await giveConsent();
+    pronunciationTestState.setScoreImpl(async () => [
+      { word: "like", wordIndex: 0, op: "sub", expectedPhoneme: "L", spokenPhoneme: "R" },
+    ]);
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    await queue.next(); // session_started
+    await drainSpokenLine(queue);
+
+    ws.send(Buffer.from([1, 2, 3]));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    emitEndOfTurn("he rike it");
+    await queue.next(); // transcript
+    await queue.next(); // end_of_turn
+    await queue.next(); // reply_text_delta
+    await queue.next(); // audio chunk
+    await queue.next(); // audio chunk
+    await queue.next(); // turn_pronunciation_errors (no grammar errors, so no turn_errors frame)
+    await queue.next(); // reply_text
+    await queue.next(); // reply_audio_end
+
+    expect(pronunciationTestState.getScoreCalls()).toEqual([Buffer.from([1, 2, 3])]);
+    expect(llmTestState.getReplyPronunciationErrorArgs()).toEqual([
+      [{ word: "like", op: "sub", expectedPhoneme: "L", spokenPhoneme: "R" }],
+    ]);
+
+    ws.terminate();
+    await app.close();
+  });
+
+  it("persists pronunciation-error rows linked to the right turn and sends them to the client", async () => {
+    await giveConsent();
+    pronunciationTestState.setScoreImpl(async () => [
+      { word: "like", wordIndex: 0, op: "sub", expectedPhoneme: "L", spokenPhoneme: "R" },
+    ]);
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    const started = (await queue.next()) as {
+      kind: "json";
+      message: { type: "session_started"; sessionId: string };
+    };
+    const sessionId = started.message.sessionId;
+    await drainSpokenLine(queue);
+
+    ws.send(Buffer.from([1, 2, 3]));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    emitEndOfTurn("he rike it");
+    await queue.next(); // transcript
+    await queue.next(); // end_of_turn
+    await queue.next(); // reply_text_delta
+    await queue.next(); // audio chunk
+    await queue.next(); // audio chunk
+
+    const pronunciationFrame = await queue.next();
+    expect(pronunciationFrame).toEqual({
+      kind: "json",
+      message: {
+        type: "turn_pronunciation_errors",
+        turnId: expect.any(String),
+        createdAt: expect.any(String),
+        errors: [
+          {
+            id: expect.any(String),
+            word: "like",
+            op: "sub",
+            expectedPhoneme: "L",
+            spokenPhoneme: "R",
+          },
+        ],
+      },
+    });
+
+    const [turn] = await db.select().from(turns).where(eq(turns.sessionId, sessionId));
+    expect(turn).toBeDefined();
+    const rows = await db
+      .select()
+      .from(turnPronunciationErrors)
+      .where(eq(turnPronunciationErrors.turnId, turn!.id));
+    expect(rows).toHaveLength(1);
+
+    ws.terminate();
+    await app.close();
+  });
+
+  it("passes an empty array to generateReply and sends no pronunciation message when nothing is detected", async () => {
+    await giveConsent();
+    pronunciationTestState.setScoreImpl(async () => []);
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    await queue.next(); // session_started
+    await drainSpokenLine(queue);
+
+    ws.send(Buffer.from([1, 2, 3]));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    emitEndOfTurn("he likes it");
+    await queue.next(); // transcript
+    await queue.next(); // end_of_turn
+    await queue.next(); // reply_text_delta
+    await queue.next(); // audio chunk
+    await queue.next(); // audio chunk
+
+    // Straight to reply_text — no turn_pronunciation_errors frame in between.
+    expect(await queue.next()).toEqual({
+      kind: "json",
+      message: { type: "reply_text", text: "Nice job!" },
+    });
+    expect(llmTestState.getReplyPronunciationErrorArgs()).toEqual([[]]);
+
+    ws.terminate();
+    await app.close();
+  });
+
+  it("keeps the turn alive (grammar correction and reply still happen) when scoreTurn fails", async () => {
+    await giveConsent();
+    pronunciationTestState.setScoreImpl(async () => {
+      throw new Error("pronunciation service unavailable");
+    });
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    await queue.next(); // session_started
+    await drainSpokenLine(queue);
+
+    ws.send(Buffer.from([1, 2, 3]));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    emitEndOfTurn("he likes it");
+    await queue.next(); // transcript
+    await queue.next(); // end_of_turn
+    await queue.next(); // reply_text_delta
+    await queue.next(); // audio chunk
+    await queue.next(); // audio chunk
+    await queue.next(); // reply_text — no pronunciation frame, and no error frame either
+    await queue.next(); // reply_audio_end
+
+    // The reply pipeline still ran, with an empty pronunciation-error list, unlike an
+    // analyzeErrors failure (which aborts the turn entirely).
+    expect(llmTestState.getCalls()).toHaveLength(1);
+    expect(llmTestState.getReplyPronunciationErrorArgs()).toEqual([[]]);
 
     ws.terminate();
     await app.close();
