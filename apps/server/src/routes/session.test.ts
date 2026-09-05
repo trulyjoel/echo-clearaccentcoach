@@ -1532,6 +1532,114 @@ describe("pronunciation correction pipeline", () => {
     await app.close();
   });
 
+  it("merges a non-empty HuPER result with a detected transcript revision in the same turn", async () => {
+    await giveConsent();
+    pronunciationTestState.setScoreImpl(async () => [
+      { word: "like", wordIndex: 0, op: "sub", expectedPhoneme: "L", spokenPhoneme: "R" },
+    ]);
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    const started = (await queue.next()) as {
+      kind: "json";
+      message: { type: "session_started"; sessionId: string };
+    };
+    const sessionId = started.message.sessionId;
+    await drainSpokenLine(queue);
+
+    ws.send(Buffer.from([1, 2, 3]));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    emitStartOfTurn("I had a berry good day");
+    // The greeting's speakLine already set replyPlaying (it only clears on a client
+    // reply_playback_ended message, which this test never sends), so StartOfTurn's barge-in
+    // check fires here even though no turn is actively running.
+    await queue.next(); // reply_interrupted (barge_in)
+    await queue.next(); // transcript (isFinal: false, from StartOfTurn)
+    emitEndOfTurn("I had a very good day");
+
+    // Collect JSON frames up to reply_audio_end, ignoring interleaved binary audio chunks —
+    // their exact position relative to turn_pronunciation_errors/reply_text is a timing race
+    // between the concurrent TTS task and the persist-then-send code path, not a guarantee this
+    // test should assert on. The JSON-only ordering is what's guaranteed.
+    const jsonMessages: ServerToClientMessage[] = [];
+    for (;;) {
+      const frame = await queue.next();
+      if (frame.kind !== "json") continue;
+      jsonMessages.push(frame.message);
+      if (frame.message.type === "reply_audio_end") break;
+    }
+    expect(jsonMessages.map((m) => m.type)).toEqual([
+      "transcript",
+      "end_of_turn",
+      "reply_text_delta",
+      "turn_pronunciation_errors",
+      "reply_text",
+      "reply_audio_end",
+    ]);
+
+    const pronunciationMessage = jsonMessages.find((m) => m.type === "turn_pronunciation_errors");
+    expect(pronunciationMessage).toEqual({
+      type: "turn_pronunciation_errors",
+      turnId: expect.any(String),
+      createdAt: expect.any(String),
+      errors: [
+        {
+          id: expect.any(String),
+          word: "like",
+          op: "sub",
+          expectedPhoneme: "L",
+          spokenPhoneme: "R",
+          source: "audio",
+        },
+        {
+          id: expect.any(String),
+          word: "very",
+          op: "sub",
+          expectedPhoneme: "V",
+          spokenPhoneme: "B",
+          source: "transcript_revision",
+        },
+      ],
+    });
+
+    // The HuPER result comes first, then the revision-detected deviation — the order the merge
+    // code in analyzeTurn produces them in, and the order generateReply receives them in too.
+    expect(llmTestState.getReplyPronunciationErrorArgs()).toEqual([
+      [
+        { word: "like", op: "sub", expectedPhoneme: "L", spokenPhoneme: "R", source: "audio" },
+        {
+          word: "very",
+          op: "sub",
+          expectedPhoneme: "V",
+          spokenPhoneme: "B",
+          source: "transcript_revision",
+        },
+      ],
+    ]);
+
+    // Confirm both rows round-trip through persistence with the right source on each — this is
+    // what would catch a persistTurn `.returning()` multi-row misalignment, where row N's fields
+    // get attributed to row M.
+    const [turn] = await db.select().from(turns).where(eq(turns.sessionId, sessionId));
+    expect(turn).toBeDefined();
+    const rows = await db
+      .select()
+      .from(turnPronunciationErrors)
+      .where(eq(turnPronunciationErrors.turnId, turn!.id));
+    expect(rows).toHaveLength(2);
+    expect(rows.map((row) => ({ word: row.word, source: row.source }))).toEqual([
+      { word: "like", source: "audio" },
+      { word: "very", source: "transcript_revision" },
+    ]);
+
+    ws.terminate();
+    await app.close();
+  });
+
   it("does not leak a completed turn's transcript history into the next turn", async () => {
     await giveConsent();
     pronunciationTestState.setScoreImpl(async () => []);
