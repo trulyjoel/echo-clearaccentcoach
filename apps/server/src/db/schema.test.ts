@@ -27,6 +27,7 @@ describe("turnPronunciationErrors", () => {
         op: "sub",
         expectedPhoneme: "L",
         spokenPhoneme: "R",
+        source: "audio",
       })
       .returning();
 
@@ -36,6 +37,7 @@ describe("turnPronunciationErrors", () => {
       op: "sub",
       expectedPhoneme: "L",
       spokenPhoneme: "R",
+      source: "audio",
     });
 
     const fetched = await db
@@ -56,7 +58,14 @@ describe("turnPronunciationErrors", () => {
 
     const [error] = await db
       .insert(turnPronunciationErrors)
-      .values({ turnId: turn.id, word: "as", op: "del", expectedPhoneme: "Z", spokenPhoneme: null })
+      .values({
+        turnId: turn.id,
+        word: "as",
+        op: "del",
+        expectedPhoneme: "Z",
+        spokenPhoneme: null,
+        source: "transcript_revision",
+      })
       .returning();
 
     expect(error?.spokenPhoneme).toBeNull();

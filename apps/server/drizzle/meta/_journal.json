@@ -71,6 +71,13 @@
       "when": 1788577676551,
       "tag": "0009_dazzling_eternity",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1788635994668,
+      "tag": "0010_dark_revanche",
+      "breakpoints": true
     }
   ]
 }

@@ -1,0 +1,2 @@
+CREATE TYPE "public"."pronunciation_error_source" AS ENUM('audio', 'transcript_revision');--> statement-breakpoint
+ALTER TABLE "turn_pronunciation_errors" ADD COLUMN "source" "pronunciation_error_source" NOT NULL;

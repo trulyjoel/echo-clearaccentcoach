@@ -3,6 +3,7 @@ import {
   L1_VALUES,
   PROFICIENCY_LEVELS,
   PRONUNCIATION_EDIT_OPS,
+  PRONUNCIATION_ERROR_SOURCES,
   SESSION_END_REASONS,
 } from "@kalli/types";
 import { boolean, integer, pgEnum, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
@@ -66,6 +67,9 @@ export const turnErrors = pgTable("turn_errors", {
 });
 
 export const pronunciationEditOpEnum = pgEnum("pronunciation_edit_op", [...PRONUNCIATION_EDIT_OPS]);
+export const pronunciationErrorSourceEnum = pgEnum("pronunciation_error_source", [
+  ...PRONUNCIATION_ERROR_SOURCES,
+]);
 
 export const turnPronunciationErrors = pgTable("turn_pronunciation_errors", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -76,6 +80,7 @@ export const turnPronunciationErrors = pgTable("turn_pronunciation_errors", {
   op: pronunciationEditOpEnum("op").notNull(),
   expectedPhoneme: text("expected_phoneme").notNull(),
   spokenPhoneme: text("spoken_phoneme"),
+  source: pronunciationErrorSourceEnum("source").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
