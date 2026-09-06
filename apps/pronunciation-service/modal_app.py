@@ -29,6 +29,7 @@ image = (
         "pydantic==2.13.5",
     )
     .run_function(_download_corrector)
+    .add_local_python_source("handler", "models", "pipeline", "schemas")
 )
 
 app = modal.App("kalli-pronunciation-service", image=image)
