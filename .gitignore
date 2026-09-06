@@ -9,3 +9,7 @@ dist/
 .superpowers/
 apps/server/tts-comparison/
 .worktrees/
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
