@@ -27,6 +27,14 @@ function getServiceUrl(): string {
   return url;
 }
 
+function getServiceToken(): string {
+  const token = process.env["PRONUNCIATION_SERVICE_TOKEN"];
+  if (!token) {
+    throw new Error("PRONUNCIATION_SERVICE_TOKEN is required (see apps/server/.env.example)");
+  }
+  return token;
+}
+
 /** The pronunciation service is a separate, not-yet-built system reachable only over HTTP — its
  * response is untrusted input, not a value this codebase controls the shape of. String fields are
  * bounded because they flow unvalidated into the reply LLM's prompt via
@@ -54,6 +62,7 @@ class HttpPronunciationProvider implements PronunciationProvider {
     const response = await fetch(`${getServiceUrl()}/score`, {
       method: "POST",
       body: form,
+      headers: { Authorization: `Bearer ${getServiceToken()}` },
       signal: AbortSignal.timeout(SCORE_TURN_TIMEOUT_MS),
     });
     if (!response.ok) {

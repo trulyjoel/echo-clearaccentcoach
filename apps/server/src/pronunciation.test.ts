@@ -11,10 +11,12 @@ function jsonResponse(body: unknown, status = 200): Response {
 describe("HttpPronunciationProvider", () => {
   const originalFetch = global.fetch;
   const originalUrl = process.env["PRONUNCIATION_SERVICE_URL"];
+  const originalToken = process.env["PRONUNCIATION_SERVICE_TOKEN"];
 
   afterEach(() => {
     global.fetch = originalFetch;
     process.env["PRONUNCIATION_SERVICE_URL"] = originalUrl;
+    process.env["PRONUNCIATION_SERVICE_TOKEN"] = originalToken;
   });
 
   it("throws when PRONUNCIATION_SERVICE_URL is not configured", async () => {
@@ -27,11 +29,14 @@ describe("HttpPronunciationProvider", () => {
 
   it("POSTs the audio and canonical phones as multipart form data and returns the edit ops", async () => {
     process.env["PRONUNCIATION_SERVICE_URL"] = "https://pronunciation.example.test";
+    process.env["PRONUNCIATION_SERVICE_TOKEN"] = "test-token";
     let capturedUrl: string | undefined;
     let capturedForm: FormData | undefined;
+    let capturedHeaders: Headers | undefined;
     global.fetch = vi.fn(async (url: string | URL, init?: RequestInit) => {
       capturedUrl = String(url);
       capturedForm = init?.body as FormData;
+      capturedHeaders = new Headers(init?.headers);
       return jsonResponse({
         editOps: [
           { word: "like", wordIndex: 0, op: "sub", expectedPhoneme: "L", spokenPhoneme: "R" },
@@ -42,6 +47,7 @@ describe("HttpPronunciationProvider", () => {
     const result = await getPronunciationProvider().scoreTurn(Buffer.from([1, 2, 3]), SAMPLE_PHONES);
 
     expect(capturedUrl).toBe("https://pronunciation.example.test/score");
+    expect(capturedHeaders?.get("authorization")).toBe("Bearer test-token");
     expect(capturedForm?.get("canonical_phones")).toBe(JSON.stringify(SAMPLE_PHONES));
     const audioPart = capturedForm?.get("audio");
     expect(audioPart).toBeInstanceOf(Blob);
