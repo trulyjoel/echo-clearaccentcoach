@@ -2,6 +2,10 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from schemas import CanonicalWord, PronunciationEditOp
+
+_NO_INSERTION = {"<NONE>", "NONE", "<PAD>"}
+
 
 def decode_audio(webm_bytes: bytes) -> Path:
     """Decodes a WebM/Opus turn recording to a 16kHz mono WAV file at a temp path.
@@ -22,3 +26,52 @@ def decode_audio(webm_bytes: bytes) -> Path:
         stderr = result.stderr.decode(errors="replace")
         raise RuntimeError(f"ffmpeg decode failed: {stderr}")
     return tmp_path
+
+
+def to_edit_ops(
+    log: list[dict], canonical_phones: list[CanonicalWord]
+) -> list[PronunciationEditOp]:
+    """Maps the Corrector's per-position edit log onto the wire-format edit-op list.
+
+    `log` must have exactly one entry per canonical phone, in the same order the phones were
+    flattened into the `text` passed to `predict()`.
+    """
+    positions = [
+        (word.word, word_index)
+        for word_index, word in enumerate(canonical_phones)
+        for _ in word.phones
+    ]
+    if len(positions) != len(log):
+        raise ValueError(
+            f"log length {len(log)} does not match canonical phone count {len(positions)}"
+        )
+
+    ops: list[PronunciationEditOp] = []
+    for (word_text, word_index), entry in zip(positions, log, strict=True):
+        op = entry["op"]
+        src = entry["src"]
+        ins = entry["ins"]
+
+        if op == "DEL":
+            ops.append(
+                PronunciationEditOp(
+                    word=word_text, wordIndex=word_index, op="del",
+                    expectedPhoneme=src, spokenPhoneme=None,
+                )
+            )
+        elif op.startswith("SUB:") and op != "SUB:<PAD>":
+            ops.append(
+                PronunciationEditOp(
+                    word=word_text, wordIndex=word_index, op="sub",
+                    expectedPhoneme=src, spokenPhoneme=op.removeprefix("SUB:"),
+                )
+            )
+
+        if ins not in _NO_INSERTION:
+            ops.append(
+                PronunciationEditOp(
+                    word=word_text, wordIndex=word_index, op="ins",
+                    expectedPhoneme=None, spokenPhoneme=ins,
+                )
+            )
+    return ops
