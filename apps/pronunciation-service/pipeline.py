@@ -1,6 +1,7 @@
 import subprocess
 import tempfile
 from pathlib import Path
+from typing import Protocol
 
 from schemas import CanonicalWord, PronunciationEditOp
 
@@ -75,3 +76,17 @@ def to_edit_ops(
                 )
             )
     return ops
+
+
+class Corrector(Protocol):
+    def predict(self, wav_path: str, text: str) -> tuple[list[str], list[dict]]: ...
+
+
+def run_corrector(
+    corrector: Corrector, wav_path: Path, canonical_phones: list[CanonicalWord]
+) -> list[dict]:
+    """Runs the Corrector against a turn's decoded audio and canonical phones, returning the
+    per-position edit log (discards `final_phonemes`, which nothing downstream needs)."""
+    text = " ".join(phone for word in canonical_phones for phone in word.phones)
+    _final_phonemes, log = corrector.predict(str(wav_path), text)
+    return log

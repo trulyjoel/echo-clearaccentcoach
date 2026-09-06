@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from pipeline import decode_audio, to_edit_ops
+from pipeline import decode_audio, run_corrector, to_edit_ops
 from schemas import CanonicalWord
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample.webm"
@@ -125,3 +125,25 @@ def test_to_edit_ops_ignores_pad_positions():
 def test_to_edit_ops_raises_on_log_length_mismatch():
     with pytest.raises(ValueError, match="does not match"):
         to_edit_ops([{"src": "HH", "op": "KEEP", "ins": "<NONE>"}], CANONICAL)
+
+
+class FakeCorrector:
+    def __init__(self):
+        self.calls: list[tuple[str, str]] = []
+
+    def predict(self, wav_path: str, text: str) -> tuple[list[str], list[dict]]:
+        self.calls.append((wav_path, text))
+        return (["HH", "IY"], [{"src": "HH", "op": "KEEP", "ins": "<NONE>"}])
+
+
+def test_run_corrector_joins_canonical_phones_into_a_space_separated_string():
+    fake = FakeCorrector()
+    canonical = [
+        CanonicalWord(word="he", phones=["HH", "IY"]),
+        CanonicalWord(word="likes", phones=["L", "AY", "K", "S"]),
+    ]
+
+    log = run_corrector(fake, Path("/tmp/turn.wav"), canonical)
+
+    assert fake.calls == [("/tmp/turn.wav", "HH IY L AY K S")]
+    assert log == [{"src": "HH", "op": "KEEP", "ins": "<NONE>"}]
