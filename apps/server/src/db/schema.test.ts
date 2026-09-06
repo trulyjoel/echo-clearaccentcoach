@@ -70,4 +70,28 @@ describe("turnPronunciationErrors", () => {
 
     expect(error?.spokenPhoneme).toBeNull();
   });
+
+  it("allows a null expectedPhoneme for an insertion", async () => {
+    const [session] = await db.insert(sessions).values({ clerkUserId: "test-user-schema-3" }).returning();
+    if (!session) throw new Error("Failed to insert session");
+    const [turn] = await db
+      .insert(turns)
+      .values({ sessionId: session.id, transcript: "I like it a lot", reply: "..." })
+      .returning();
+    if (!turn) throw new Error("Failed to insert turn");
+
+    const [error] = await db
+      .insert(turnPronunciationErrors)
+      .values({
+        turnId: turn.id,
+        word: "like",
+        op: "ins",
+        expectedPhoneme: null,
+        spokenPhoneme: "AH",
+        source: "audio",
+      })
+      .returning();
+
+    expect(error?.expectedPhoneme).toBeNull();
+  });
 });

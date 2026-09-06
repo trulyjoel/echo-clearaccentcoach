@@ -9,7 +9,7 @@ export interface PronunciationEditOp {
   word: string;
   wordIndex: number;
   op: PronunciationEditOpKind;
-  expectedPhoneme: string;
+  expectedPhoneme: string | null;
   spokenPhoneme: string | null;
 }
 
@@ -35,7 +35,7 @@ const editOpSchema = z.object({
   word: z.string().max(200),
   wordIndex: z.number().int().nonnegative(),
   op: z.enum(PRONUNCIATION_EDIT_OPS),
-  expectedPhoneme: z.string().max(50),
+  expectedPhoneme: z.string().max(50).nullable(),
   spokenPhoneme: z.string().max(50).nullable(),
 });
 

@@ -217,11 +217,13 @@ function buildPronunciationErrorContext(errors: DetectedPronunciationError[]): s
   const errorList = errors
     .map((error) => {
       const spoken = error.spokenPhoneme ?? "(nothing)";
+      const expected =
+        error.expectedPhoneme === null ? "expected nothing here" : `expected /${error.expectedPhoneme}/`;
       const evidence =
         error.source === "audio"
-          ? `expected /${error.expectedPhoneme}/, said /${spoken}/`
-          : `expected /${error.expectedPhoneme}/, may have said /${spoken}/ (inferred from the ` +
-            `transcript revising itself mid-turn, not confirmed against the audio)`;
+          ? `${expected}, said /${spoken}/`
+          : `${expected}, may have said /${spoken}/ (inferred from the transcript revising ` +
+            `itself mid-turn, not confirmed against the audio)`;
       return `- "${error.word}": ${evidence} (${error.op})`;
     })
     .join("\n");

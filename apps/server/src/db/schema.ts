@@ -78,7 +78,7 @@ export const turnPronunciationErrors = pgTable("turn_pronunciation_errors", {
     .references(() => turns.id),
   word: text("word").notNull(),
   op: pronunciationEditOpEnum("op").notNull(),
-  expectedPhoneme: text("expected_phoneme").notNull(),
+  expectedPhoneme: text("expected_phoneme"),
   spokenPhoneme: text("spoken_phoneme"),
   source: pronunciationErrorSourceEnum("source").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

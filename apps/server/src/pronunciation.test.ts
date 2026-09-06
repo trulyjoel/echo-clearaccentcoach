@@ -85,6 +85,23 @@ describe("HttpPronunciationProvider", () => {
     ).rejects.toThrow();
   });
 
+  it("round-trips a null expectedPhoneme for an insertion", async () => {
+    process.env["PRONUNCIATION_SERVICE_URL"] = "https://pronunciation.example.test";
+    global.fetch = vi.fn(async () =>
+      jsonResponse({
+        editOps: [
+          { word: "like", wordIndex: 0, op: "ins", expectedPhoneme: null, spokenPhoneme: "AH" },
+        ],
+      }),
+    ) as unknown as typeof fetch;
+
+    const result = await getPronunciationProvider().scoreTurn(Buffer.from([1, 2, 3]), SAMPLE_PHONES);
+
+    expect(result).toEqual([
+      { word: "like", wordIndex: 0, op: "ins", expectedPhoneme: null, spokenPhoneme: "AH" },
+    ]);
+  });
+
   it("rejects when the request never resolves within the timeout", async () => {
     process.env["PRONUNCIATION_SERVICE_URL"] = "https://pronunciation.example.test";
     let capturedSignal: AbortSignal | undefined;

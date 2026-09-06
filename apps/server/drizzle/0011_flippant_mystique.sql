@@ -1,0 +1,1 @@
+ALTER TABLE "turn_pronunciation_errors" ALTER COLUMN "expected_phoneme" DROP NOT NULL;

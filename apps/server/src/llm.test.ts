@@ -341,6 +341,27 @@ describe("generateReply with pronunciation errors", () => {
     expect(text).toContain("may have said");
   });
 
+  it("phrases a null expectedPhoneme as 'expected nothing here' for an insertion", async () => {
+    aiTestState.streamTextCalls.length = 0;
+    const provider = getLLMProvider();
+
+    const stream = provider.generateReply(
+      [{ role: "user", content: "he likesa it" }],
+      [],
+      [{ word: "likes", op: "ins", expectedPhoneme: null, spokenPhoneme: "AH", source: "audio" }],
+      SAMPLE_SYSTEM_PROMPT,
+    );
+    for await (const _ of stream.textStream) {
+      // drain
+    }
+
+    const call = aiTestState.streamTextCalls.at(-1);
+    const lastMessage = call?.messages?.at(-1);
+    const content = lastMessage?.content;
+    const text = (content as { text: string }[]).map((part) => part.text).join("");
+    expect(text).toContain("expected nothing here");
+  });
+
   it("omits the pronunciation-error block when the list is empty", async () => {
     aiTestState.streamTextCalls.length = 0;
     const provider = getLLMProvider();

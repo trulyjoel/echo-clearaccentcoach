@@ -76,7 +76,8 @@ export type PronunciationErrorSource = (typeof PRONUNCIATION_ERROR_SOURCES)[numb
 export interface DetectedPronunciationError {
   word: string;
   op: PronunciationEditOpKind;
-  expectedPhoneme: string;
+  /** The canonical phoneme, or `null` for an inserted phone with no canonical counterpart. */
+  expectedPhoneme: string | null;
   /** The phoneme actually realized in the audio, or `null` for a deletion (nothing was spoken in
    * its place). */
   spokenPhoneme: string | null;
