@@ -1,0 +1,29 @@
+[project]
+name = "pronunciation-service"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = [
+    "modal==1.5.5",
+    "fastapi==0.141.1",
+    "pydantic==2.13.5",
+    "python-multipart==0.0.32",
+]
+
+[dependency-groups]
+dev = [
+    "pytest==9.1.1",
+    "ruff==0.16.6",
+    "ty==0.0.78",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ty.rules]
