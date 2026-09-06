@@ -28,7 +28,7 @@ image = (
         "python-multipart==0.0.32",
         "pydantic==2.13.5",
     )
-    .add_local_python_source("handler", "models", "pipeline", "schemas")
+    .add_local_python_source("handler", "models", "pipeline", "schemas", copy=True)
     .run_function(_download_corrector)
 )
 
