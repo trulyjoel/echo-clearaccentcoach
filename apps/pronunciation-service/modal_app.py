@@ -28,8 +28,8 @@ image = (
         "python-multipart==0.0.32",
         "pydantic==2.13.5",
     )
-    .run_function(_download_corrector)
     .add_local_python_source("handler", "models", "pipeline", "schemas")
+    .run_function(_download_corrector)
 )
 
 app = modal.App("kalli-pronunciation-service", image=image)
