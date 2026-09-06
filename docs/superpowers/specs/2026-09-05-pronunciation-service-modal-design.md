@@ -147,10 +147,11 @@ The `/score` route:
 - **Pinned dependency versions** (current stable as of this plan; exact, no `^`/`~`, per the global
   Python/dependency standard): `modal==1.5.5`, `fastapi==0.141.1`, `pydantic==2.13.5`,
   `python-multipart==0.0.32`, `transformers==5.16.1`, `torch==2.14.0`,
-  `huggingface-hub==1.30.0`, `numpy==2.5.2`, `pytest==9.1.1`, `ruff==0.16.6`, `ty==0.0.78`.
-  `torchaudio` is deliberately not a dependency — the Recognizer quickstart used it for
-  load+resample, but this service never touches the Recognizer, and `decode_audio` already produces
-  a 16kHz mono WAV via `ffmpeg` directly.
+  `huggingface-hub==1.30.0`, `pytest==9.1.1`, `ruff==0.16.6`, `ty==0.0.78`. Neither `torchaudio` nor
+  `numpy` is a dependency — the Recognizer quickstart used `torchaudio` for load+resample and a
+  numpy array as the in-memory audio representation, but this service never touches the Recognizer;
+  `decode_audio` writes a 16kHz mono WAV file directly via `ffmpeg`, and `predict()` takes that file
+  path, so nothing here ever holds audio as an in-memory array.
 
 ## TS-side follow-up (in scope for this plan)
 
