@@ -50,12 +50,14 @@ plan"; this is that plan's design.
 ```
 apps/pronunciation-service/
 ├── modal_app.py       # Modal app: image build, GPU config, secret, fastapi_endpoint for /score
-├── models.py          # HuperCorrector: loads PhonemeCorrectionInference once per container
-├── pipeline.py         # pure functions: decode_audio, run_corrector, to_edit_ops
-├── schemas.py          # pydantic request/response models matching the fixed wire contract
+├── handler.py          # framework-agnostic orchestration: auth check, parse, call pipeline.py
+├── models.py           # HuperCorrector: loads PhonemeCorrectionInference once per container
+├── pipeline.py          # pure functions: decode_audio, run_corrector, to_edit_ops
+├── schemas.py           # pydantic request/response models matching the fixed wire contract
 ├── tests/
 │   ├── test_pipeline.py # pytest: decode_audio for real, to_edit_ops against fake phone-op sequences
-│   └── test_schemas.py  # pytest: request validation and auth-failure paths
+│   ├── test_handler.py  # pytest: auth check, request parsing, orchestration (fake corrector)
+│   └── test_schemas.py  # pytest: pydantic model construction/validation
 ├── pyproject.toml       # uv-managed deps; ruff/ty config
 └── README.md            # deploy instructions, secret provisioning
 ```
@@ -66,11 +68,15 @@ colocated — the colocated `*.test.ts` pattern is TS-specific and doesn't apply
 `pipeline.py` has no Modal imports — the only I/O it does is the audio decode (a temp WAV file) and
 the model call itself; everything else is plain data in, plain data out. This is the same
 pure/adapter split already used on the TS side (`g2p.ts` is pure; `pronunciation.ts` is the
-vendor-call adapter). `modal_app.py` is the thin layer: a single `@app.cls()` GPU class that loads
-the model once via `@modal.enter()`, with one `@modal.fastapi_endpoint(method="POST")` method
-(Modal's documented pattern for a class with exactly one HTTP route — a hand-built ASGI app would be
-pure overhead here) that does auth-check → parse → call into `pipeline.py` → map result to JSON,
-with no branching logic of its own beyond that.
+vendor-call adapter). `handler.py` sits one layer up: it also has no Modal or FastAPI imports, and
+orchestrates the full request (auth check → parse `canonical_phones` → call `pipeline.py` → build
+the response), raising plain exceptions (`UnauthorizedError`, `InvalidRequestError`) rather than
+HTTP-specific ones — this is what makes auth/parsing logic unit-testable without spinning up Modal
+or FastAPI at all. `modal_app.py` is the thin layer on top of that: a single `@app.cls()` GPU class
+that loads the model once via `@modal.enter()`, with one `@modal.fastapi_endpoint(method="POST")`
+method (Modal's documented pattern for a class with exactly one HTTP route — a hand-built ASGI app
+would be pure overhead here) that calls `handler.py` and translates its exceptions to HTTP status
+codes, with no other logic of its own.
 
 ## Model loading and inference pipeline
 
@@ -189,9 +195,13 @@ so widening the type is all that's required there.
   of the same word (two entries, same `wordIndex`), and a `SUB:<PAD>`/`<PAD>` position (produces no
   entry). `run_corrector` gets a thin call-through test only — there's nothing but a model call to
   exercise until a real-model integration test exists (deferred, see Non-goals).
-- `tests/test_schemas.py`: malformed `canonical_phones` JSON, missing audio part, wrong/missing auth
-  token → expected `4xx`/`401`. Nothing here touches Modal's decorators or deploys anything;
-  everything runs as plain pytest against `pipeline.py`/`schemas.py` directly.
+- `tests/test_schemas.py`: pydantic model construction and validation (rejects an unknown `op`,
+  accepts a null `expectedPhoneme`).
+- `tests/test_handler.py`: malformed `canonical_phones` JSON, a wrong/missing bearer token, and the
+  success path, all against a fake `Corrector` — covers what was originally scoped as
+  `test_schemas.py`'s "auth-failure paths" plus the orchestration itself. Nothing here touches
+  Modal's decorators or deploys anything; everything runs as plain pytest against `handler.py`
+  directly.
 - TS-side: see the specific test additions listed under "TS-side follow-up" above.
 
 ## Further notes
