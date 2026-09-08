@@ -1,28 +1,25 @@
-class HuperCorrector:
-    """Thin wrapper around `edit_seq_speech.inference.PhonemeCorrectionInference`.
-
-    The import is deferred to `__init__` (rather than module level) because `edit_seq_speech` is
-    bundled inside the `huper29/huper_corrector` Hugging Face repo and only present in the built
-    Modal container image — never in the local dev/test venv (see Task 2's note).
+class HuperRecognizer:
+    """Wraps huper29/huper_recognizer, a standard `transformers` WavLM-Large CTC phone recognizer —
+    unlike the HuPER Corrector this replaces, no bespoke `edit_seq_speech` package or sys.path
+    hack is needed; it's loadable through `transformers` alone.
     """
 
-    def __init__(self, checkpoint_path: str, vocab_path: str) -> None:
-        import sys
-        from pathlib import Path
+    def __init__(self, repo_id: str = "huper29/huper_recognizer") -> None:
+        from transformers import Wav2Vec2Processor, WavLMForCTC  # ty: ignore[unresolved-import]
 
-        # `edit_seq_speech` is a plain directory inside the downloaded HF repo, not an installed
-        # package - it's only importable once its containing directory is on sys.path, matching
-        # the model's own quickstart (`sys.path.append(repo_dir)`).
-        repo_dir = str(Path(checkpoint_path).parent)
-        if repo_dir not in sys.path:
-            sys.path.append(repo_dir)
+        self.processor = Wav2Vec2Processor.from_pretrained(repo_id)
+        self.model = WavLMForCTC.from_pretrained(repo_id)
+        self.model.eval()
+        self.label2id: dict[str, int] = dict(self.model.config.label2id)
+        self.id2label: dict[int, str] = dict(self.model.config.id2label)
 
-        # ty: ignore[unresolved-import] -- bundled in the HF repo, present only in the Modal image
-        from edit_seq_speech.inference import PhonemeCorrectionInference
+    def log_probs(self, waveform):
+        """Returns log-softmax'd per-frame class log-probabilities for a 16kHz mono waveform,
+        shape (1, T, C)."""
+        import torch
+        import torch.nn.functional as F
 
-        self._infer = PhonemeCorrectionInference(
-            checkpoint_path=checkpoint_path, vocab_path=vocab_path
-        )
-
-    def predict(self, wav_path: str, text: str) -> tuple[list[str], list[dict]]:
-        return self._infer.predict(wav_path, text)
+        inputs = self.processor(waveform, sampling_rate=16000, return_tensors="pt")
+        with torch.no_grad():
+            logits = self.model(**inputs).logits
+        return F.log_softmax(logits, dim=-1)
