@@ -1,7 +1,7 @@
 import os
 
 import modal
-from fastapi import File, Form, Header, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 
 from handler import InvalidRequestError, UnauthorizedError, handle_score_request
 from models import HuperCorrector
@@ -60,24 +60,33 @@ class PronunciationService:
             vocab_path=f"{MODEL_DIR}/edit_seq_speech/config/vocab.json",
         )
 
-    @modal.fastapi_endpoint(method="POST")
-    async def score(
-        self,
-        audio: UploadFile = File(...),
-        canonical_phones: str = Form(...),
-        authorization: str | None = Header(None),
-    ) -> ScoreResponse:
-        try:
-            return handle_score_request(
-                self.corrector,
-                await audio.read(),
-                canonical_phones,
-                authorization,
-                os.environ["PRONUNCIATION_SERVICE_TOKEN"],
-            )
-        except UnauthorizedError as exc:
-            raise HTTPException(status_code=401, detail=str(exc)) from exc
-        except InvalidRequestError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        except Exception as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
+    @modal.asgi_app()
+    def web(self) -> FastAPI:
+        # @modal.fastapi_endpoint has no path parameter - it always serves at the URL root, which
+        # doesn't match the already-shipped TS adapter's fixed `POST {url}/score` contract. A
+        # manually-built FastAPI app under @modal.asgi_app lets /score be an explicit route instead
+        # of changing that contract to fit the decorator's default.
+        web_app = FastAPI()
+
+        @web_app.post("/score")
+        async def score(
+            audio: UploadFile = File(...),
+            canonical_phones: str = Form(...),
+            authorization: str | None = Header(None),
+        ) -> ScoreResponse:
+            try:
+                return handle_score_request(
+                    self.corrector,
+                    await audio.read(),
+                    canonical_phones,
+                    authorization,
+                    os.environ["PRONUNCIATION_SERVICE_TOKEN"],
+                )
+            except UnauthorizedError as exc:
+                raise HTTPException(status_code=401, detail=str(exc)) from exc
+            except InvalidRequestError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            except Exception as exc:
+                raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+        return web_app

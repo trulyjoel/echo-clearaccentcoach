@@ -49,7 +49,7 @@ plan"; this is that plan's design.
 
 ```
 apps/pronunciation-service/
-├── modal_app.py       # Modal app: image build, GPU config, secret, fastapi_endpoint for /score
+├── modal_app.py       # Modal app: image build, GPU config, secret, asgi_app with POST /score
 ├── handler.py          # framework-agnostic orchestration: auth check, parse, call pipeline.py
 ├── models.py           # HuperCorrector: loads PhonemeCorrectionInference once per container
 ├── pipeline.py          # pure functions: decode_audio, run_corrector, to_edit_ops
@@ -73,10 +73,14 @@ orchestrates the full request (auth check → parse `canonical_phones` → call 
 the response), raising plain exceptions (`UnauthorizedError`, `InvalidRequestError`) rather than
 HTTP-specific ones — this is what makes auth/parsing logic unit-testable without spinning up Modal
 or FastAPI at all. `modal_app.py` is the thin layer on top of that: a single `@app.cls()` GPU class
-that loads the model once via `@modal.enter()`, with one `@modal.fastapi_endpoint(method="POST")`
-method (Modal's documented pattern for a class with exactly one HTTP route — a hand-built ASGI app
-would be pure overhead here) that calls `handler.py` and translates its exceptions to HTTP status
-codes, with no other logic of its own.
+that loads the model once via `@modal.enter()`, with one `@modal.asgi_app()` method building a small
+FastAPI app with an explicit `POST /score` route, that calls `handler.py` and translates its
+exceptions to HTTP status codes, with no other logic of its own. This design originally planned
+`@modal.fastapi_endpoint(method="POST")` instead (Modal's simpler single-route decorator) — deploy
+testing found that decorator has no path parameter at all and always serves at the URL root, which
+doesn't satisfy the already-shipped TS adapter's fixed `POST {url}/score` contract. Switched to a
+manually-built FastAPI app under `@modal.asgi_app` so `/score` is an explicit route, rather than
+changing that contract to fit the decorator's default.
 
 ## Model loading and inference pipeline
 
