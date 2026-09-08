@@ -116,23 +116,20 @@ problem — see Non-goals.
   phone that isn't in the canonical sequence at all." `op: "ins"` is not produced by this design;
   the wire schema keeps the field (TS side already treats it as optional/absent per-turn) but no
   code path emits it. Revisit if this becomes a real gap in practice.
-- **The repeated-adjacent-canonical-phone edge case.** `_group_into_spans` only merges two frames
-  into one span when they're truly frame-contiguous with a matching token id — a blank-separated
-  repeat (e.g. two genuinely distinct occurrences of a phone with silence/closure between them)
-  correctly produces two separate spans. The residual gap is narrower than that: when two
-  identical canonical phones in a row (e.g. "good day"'s `D D`) are realized with *zero* acoustic
-  separation at all — no blank frame anywhere between them — CTC forced alignment has no way to
-  place a boundary, and the two target positions collapse into one degenerate span. Confirmed in
-  the spike (`day`'s second `D` inherited a nonsensical "most-likely phone: EY" from the following
-  word). **This is not contained to the doubled phone itself** — every canonical phone after the
-  collapse point shifts out of alignment with `score_pronunciation`'s span list by one position,
-  producing a wrong score for at least one subsequent phone, and the last phone(s) of the sequence
-  can fall off the end of the span list and go entirely unscored (silently, not as an error). A
-  true zero-separation collapse is rare (real speech almost always leaves at least a brief closure
-  between two identical adjacent phones), but its blast radius when it does occur is the rest of
-  the sentence, not just the one position — worth a real fix (e.g. detecting a zero-width span and
-  re-synchronizing the remaining phones against their own frame ranges, rather than by index) as
-  follow-up, not blocking v1.
+- **The repeated-adjacent-canonical-phone edge case — resolved, not just narrowed.** An earlier
+  revision of this section described a residual "true zero-separation collapse" (two identical
+  canonical phones realized with no acoustic gap at all) as a rare-but-still-possible case that
+  could misalign every phone after it. The final whole-branch review checked this against
+  `torchaudio`'s own `forced_align` implementation directly rather than trusting the earlier
+  reasoning: CTC's alignment topology structurally forbids two identical adjacent labels without
+  an intervening blank — `forced_align` enforces this (confirmed against its source and by direct
+  testing: a target sequence with adjacent repeated tokens over frames that all favor that token
+  still comes back with a blank forced between them). So `_group_into_spans`'s frame-contiguity fix
+  (only merging truly-contiguous same-token frames) closes this case completely, not just narrows
+  it — `len(spans) == len(flat_phones)` always holds, and `score_pronunciation`'s `i >= len(spans)`
+  guard is dead code. That guard is now a loud invariant assertion instead of a silent `continue`
+  (see `score_pronunciation`), so if this reasoning is ever wrong for some input this design didn't
+  anticipate, it fails loudly rather than silently dropping phones from scoring.
 - **Renegotiating the wire contract, DB schema, or TS pipeline.** Everything outside
   `apps/pronunciation-service` is unchanged.
 - **A second vendor (Azure/Speechace) comparison.** Out of scope for this design; a candidate for
