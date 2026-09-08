@@ -153,13 +153,24 @@ The `/score` route:
 - **Pinned dependency versions** (current stable as of this plan; exact, no `^`/`~`, per the global
   Python/dependency standard): `modal==1.5.5`, `fastapi==0.141.1`, `pydantic==2.13.5`,
   `python-multipart==0.0.32`, `transformers==5.16.1`, `torch==2.14.0`, `torchaudio==2.11.0`,
-  `huggingface-hub==1.30.0`, `pytest==9.1.1`, `ruff==0.16.6`, `ty==0.0.78`. `torchaudio` is an
-  image-only dependency (not a local one, same as `torch`/`transformers`/`huggingface-hub`) —
-  discovered at first real deploy that `PhonemeCorrectionInference.predict()` loads the wav file via
-  `torchaudio` internally, which this design didn't anticipate (it only knew about `torchaudio`'s
-  use in the Recognizer's quickstart, a model this service doesn't use — see "Model loading and
-  inference pipeline"). `torchaudio==2.11.0`'s own compatibility matrix confirms it supports
-  `torch==2.14.0` (built against PyTorch's stable ABI, compatible with 2.11 and all later releases).
+  `huggingface-hub==1.30.0`, `g2p-en==2.1.0`, `pytorch-lightning==2.6.5`, `pytest==9.1.1`,
+  `ruff==0.16.6`, `ty==0.0.78`. `torchaudio`, `g2p-en`, and `pytorch-lightning` are image-only
+  dependencies (not local ones, same as `torch`/`transformers`/`huggingface-hub`) — none were
+  anticipated by this design, which only had `edit_seq_speech.inference`'s documented
+  `PhonemeCorrectionInference(checkpoint_path, vocab_path)`/`predict(wav_path, text)` surface to go
+  on, not its internal imports. Discovered one at a time across the first several real deploy
+  attempts by reading the actual crash tracebacks and, for the last two, the module's real source
+  (`correction/inference.py` and `correction/model.py` on GitHub) directly, rather than continuing
+  to guess: `torch`/`torch.nn`/`torchaudio` (wav loading), `g2p_en` (the "G2P converter" component
+  the model card mentions), `pytorch_lightning` (the checkpoint format — `hparams.json` in the HF
+  repo is itself a Lightning artifact). `torchaudio==2.11.0`'s own compatibility matrix confirms it
+  supports `torch==2.14.0` (built against PyTorch's stable ABI, compatible with 2.11 and later).
+  `g2p_en` looks up two NLTK corpora (`averaged_perceptron_tagger`, `cmudict`) by name at
+  first-use time; the image build pre-downloads both via a `nltk.download(...)` build step
+  (`_download_nltk_data`, alongside `_download_corrector`) so no container needs runtime network
+  access for them. `g2p_en`'s own further transitive deps (`numpy`, `nltk`, `inflect`, `distance`)
+  aren't individually pinned here, same reasoning as not hand-pinning `transformers`' own transitive
+  dependencies elsewhere in this list.
   `numpy` is still not a dependency: `decode_audio` writes a 16kHz mono WAV file directly via
   `ffmpeg`, and `predict()` takes that file path — `torchaudio` (inside the Corrector's own code)
   is what actually loads it, this codebase's own code never holds audio as an in-memory array.

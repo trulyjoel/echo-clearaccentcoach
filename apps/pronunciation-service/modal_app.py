@@ -17,6 +17,17 @@ def _download_corrector() -> None:
     snapshot_download("huper29/huper_corrector", local_dir=MODEL_DIR)
 
 
+def _download_nltk_data() -> None:
+    # ty: ignore[unresolved-import] -- only installed inside the Modal image, not the local venv
+    import nltk
+
+    # g2p_en (a transitive dependency of edit_seq_speech.inference) looks up these two corpora by
+    # exactly these names at import/first-use time - pre-downloading avoids a runtime network
+    # dependency (and the cold-start latency/failure risk that comes with it) on every container.
+    nltk.download("averaged_perceptron_tagger")
+    nltk.download("cmudict")
+
+
 image = (
     modal.Image.debian_slim(python_version="3.13")
     .apt_install("ffmpeg")
@@ -28,9 +39,12 @@ image = (
         "fastapi==0.141.1",
         "python-multipart==0.0.32",
         "pydantic==2.13.5",
+        "g2p-en==2.1.0",
+        "pytorch-lightning==2.6.5",
     )
     .add_local_python_source("handler", "models", "pipeline", "schemas", copy=True)
     .run_function(_download_corrector)
+    .run_function(_download_nltk_data)
 )
 
 app = modal.App("kalli-pronunciation-service", image=image)
