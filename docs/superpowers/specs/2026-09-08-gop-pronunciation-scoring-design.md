@@ -116,14 +116,23 @@ problem — see Non-goals.
   phone that isn't in the canonical sequence at all." `op: "ins"` is not produced by this design;
   the wire schema keeps the field (TS side already treats it as optional/absent per-turn) but no
   code path emits it. Revisit if this becomes a real gap in practice.
-- **The repeated-adjacent-canonical-phone edge case.** When two canonical phones in a row are
-  identical (e.g. "good day"'s `D D`) and the second is acoustically reduced away, CTC forced
-  alignment can't place a blank between two identical adjacent labels without one, and the two
-  target positions collapse into one degenerate span. Confirmed in the spike (`day`'s second `D`
-  inherited a nonsensical "most-likely phone: EY" from the following word). Rare in practice
-  (requires an actual repeated phone AND a real deletion at exactly that boundary); worth a real
-  fix (e.g. detecting a zero-width span and reporting a deletion explicitly) as follow-up, not
-  blocking v1.
+- **The repeated-adjacent-canonical-phone edge case.** `_group_into_spans` only merges two frames
+  into one span when they're truly frame-contiguous with a matching token id — a blank-separated
+  repeat (e.g. two genuinely distinct occurrences of a phone with silence/closure between them)
+  correctly produces two separate spans. The residual gap is narrower than that: when two
+  identical canonical phones in a row (e.g. "good day"'s `D D`) are realized with *zero* acoustic
+  separation at all — no blank frame anywhere between them — CTC forced alignment has no way to
+  place a boundary, and the two target positions collapse into one degenerate span. Confirmed in
+  the spike (`day`'s second `D` inherited a nonsensical "most-likely phone: EY" from the following
+  word). **This is not contained to the doubled phone itself** — every canonical phone after the
+  collapse point shifts out of alignment with `score_pronunciation`'s span list by one position,
+  producing a wrong score for at least one subsequent phone, and the last phone(s) of the sequence
+  can fall off the end of the span list and go entirely unscored (silently, not as an error). A
+  true zero-separation collapse is rare (real speech almost always leaves at least a brief closure
+  between two identical adjacent phones), but its blast radius when it does occur is the rest of
+  the sentence, not just the one position — worth a real fix (e.g. detecting a zero-width span and
+  re-synchronizing the remaining phones against their own frame ranges, rather than by index) as
+  follow-up, not blocking v1.
 - **Renegotiating the wire contract, DB schema, or TS pipeline.** Everything outside
   `apps/pronunciation-service` is unchanged.
 - **A second vendor (Azure/Speechace) comparison.** Out of scope for this design; a candidate for
