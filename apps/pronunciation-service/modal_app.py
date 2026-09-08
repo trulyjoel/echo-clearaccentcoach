@@ -34,6 +34,7 @@ image = (
     .pip_install(
         "torch==2.14.0",
         "torchaudio==2.11.0",
+        "torchcodec==0.16.0",
         "transformers==5.16.1",
         "huggingface-hub==1.30.0",
         "fastapi==0.141.1",

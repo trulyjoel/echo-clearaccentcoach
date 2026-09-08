@@ -157,18 +157,24 @@ The `/score` route:
 - **Pinned dependency versions** (current stable as of this plan; exact, no `^`/`~`, per the global
   Python/dependency standard): `modal==1.5.5`, `fastapi==0.141.1`, `pydantic==2.13.5`,
   `python-multipart==0.0.32`, `transformers==5.16.1`, `torch==2.14.0`, `torchaudio==2.11.0`,
-  `huggingface-hub==1.30.0`, `g2p-en==2.1.0`, `pytorch-lightning==2.6.5`, `pytest==9.1.1`,
-  `ruff==0.16.6`, `ty==0.0.78`. `torchaudio`, `g2p-en`, and `pytorch-lightning` are image-only
-  dependencies (not local ones, same as `torch`/`transformers`/`huggingface-hub`) — none were
-  anticipated by this design, which only had `edit_seq_speech.inference`'s documented
-  `PhonemeCorrectionInference(checkpoint_path, vocab_path)`/`predict(wav_path, text)` surface to go
-  on, not its internal imports. Discovered one at a time across the first several real deploy
-  attempts by reading the actual crash tracebacks and, for the last two, the module's real source
+  `torchcodec==0.16.0`, `huggingface-hub==1.30.0`, `g2p-en==2.1.0`, `pytorch-lightning==2.6.5`,
+  `pytest==9.1.1`, `ruff==0.16.6`, `ty==0.0.78`. `torchaudio`, `torchcodec`, `g2p-en`, and
+  `pytorch-lightning` are image-only dependencies (not local ones, same as
+  `torch`/`transformers`/`huggingface-hub`) — none were anticipated by this design, which only had
+  `edit_seq_speech.inference`'s documented `PhonemeCorrectionInference(checkpoint_path,
+  vocab_path)`/`predict(wav_path, text)` surface to go on, not its internal imports or their own
+  runtime requirements. Discovered one at a time across the first several real deploy attempts, by
+  reading the actual crash tracebacks and, for two of them, the module's real source
   (`correction/inference.py` and `correction/model.py` on GitHub) directly, rather than continuing
   to guess: `torch`/`torch.nn`/`torchaudio` (wav loading), `g2p_en` (the "G2P converter" component
   the model card mentions), `pytorch_lightning` (the checkpoint format — `hparams.json` in the HF
-  repo is itself a Lightning artifact). `torchaudio==2.11.0`'s own compatibility matrix confirms it
-  supports `torch==2.14.0` (built against PyTorch's stable ABI, compatible with 2.11 and later).
+  repo is itself a Lightning artifact), and `torchcodec` (torchaudio's own audio-loading backend as
+  of the 2.x line — `torchaudio.load()` delegates to it and raises at call time, not import time, if
+  it's missing, which is why this one wasn't caught until an actual real request with a valid token
+  was made, one deploy after the others). `torchaudio==2.11.0` and `torchcodec==0.16.0`'s own
+  compatibility matrices both confirm support for `torch==2.14.0` (both built against PyTorch's
+  stable ABI: `torchaudio` 2.11 supports 2.11 and all later releases; `torchcodec` 0.16 requires
+  `torch>=2.11`).
   `g2p_en` looks up two NLTK corpora (`averaged_perceptron_tagger`, `cmudict`) by name at
   first-use time; the image build pre-downloads both via a `nltk.download(...)` build step
   (`_download_nltk_data`, alongside `_download_corrector`) so no container needs runtime network
