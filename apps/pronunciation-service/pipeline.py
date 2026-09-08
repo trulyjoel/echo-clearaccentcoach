@@ -8,6 +8,21 @@ from schemas import CanonicalWord, PronunciationEditOp
 _NO_INSERTION = {"<NONE>", "NONE", "<PAD>"}
 
 
+def _group_into_spans(aligned_frame_tokens: list[int]) -> list[tuple[int, list[int]]]:
+    """Groups consecutive identical non-blank frame token ids into (token_id, frame_indices)
+    spans, in target order — forced_align guarantees monotonic left-to-right target consumption,
+    so this never needs to look ahead or reorder anything."""
+    spans: list[tuple[int, list[int]]] = []
+    for t, token_id in enumerate(aligned_frame_tokens):
+        if token_id == 0:  # blank
+            continue
+        if spans and spans[-1][0] == token_id:
+            spans[-1][1].append(t)
+        else:
+            spans.append((token_id, [t]))
+    return spans
+
+
 def decode_audio(webm_bytes: bytes) -> Path:
     """Decodes a WebM/Opus turn recording to a 16kHz mono WAV file at a temp path.
 

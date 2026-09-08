@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from pipeline import decode_audio, run_corrector, to_edit_ops
+from pipeline import _group_into_spans, decode_audio, run_corrector, to_edit_ops
 from schemas import CanonicalWord
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample.webm"
@@ -147,3 +147,23 @@ def test_run_corrector_joins_canonical_phones_into_a_space_separated_string():
 
     assert fake.calls == [("/tmp/turn.wav", "HH IY L AY K S")]
     assert log == [{"src": "HH", "op": "KEEP", "ins": "<NONE>"}]
+
+
+def test_group_into_spans_groups_a_single_multi_frame_span():
+    assert _group_into_spans([0, 0, 5, 5, 5, 0]) == [(5, [2, 3, 4])]
+
+
+def test_group_into_spans_keeps_distinct_adjacent_phones_separate():
+    assert _group_into_spans([0, 3, 4, 0]) == [(3, [1]), (4, [2])]
+
+
+def test_group_into_spans_ignores_blank_only_input():
+    assert _group_into_spans([0, 0, 0]) == []
+
+
+def test_group_into_spans_collapses_a_repeated_adjacent_phone_with_no_blank_between():
+    # Known limitation (see the spec's Non-goals): forced_align can leave zero separation between
+    # two identical adjacent target phones when nothing acoustic distinguishes them, so both target
+    # positions land in one span instead of two. Asserted here as documented behavior, not treated
+    # as a bug to silently fix.
+    assert _group_into_spans([0, 7, 7, 7, 0]) == [(7, [1, 2, 3])]
