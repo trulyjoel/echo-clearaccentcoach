@@ -40,6 +40,12 @@ ACCEPTABLE_REALIZATIONS: dict[str, set[str]] = {
     "T": {"DX"},
 }
 
+# Non-phone classes in the recognizer's vocabulary (blank/padding and other special CTC tokens).
+# A span where these dominate the per-frame argmax is the recognizer's honest signal that nothing
+# was really articulated there, not a real (mispronounced) phone — see score_pronunciation's
+# deletion check.
+NON_PHONE_TOKENS = {"<PAD>", "<UNK>", "<BOS>", "<EOS>", "|"}
+
 
 class Recognizer(Protocol):
     """What score_pronunciation needs from a phone-recognition model — satisfied structurally by
@@ -68,34 +74,69 @@ def score_pronunciation(
     phones with no acoustic separation between them, the second occurrence (see
     _group_into_spans's docstring).
     """
+    flat_phones = [phone for word in canonical_phones for phone in word.phones]
+    if not flat_phones:
+        return []
+
     log_probs = recognizer.log_probs(waveform)
 
-    flat_phones = [phone for word in canonical_phones for phone in word.phones]
     word_positions = [
         (word.word, word_index)
         for word_index, word in enumerate(canonical_phones)
         for _ in word.phones
     ]
-    target_ids = torch.tensor(
-        [[recognizer.label2id[p] for p in flat_phones]], dtype=torch.int64
-    )
+    target_id_list = []
+    for phone in flat_phones:
+        if phone not in recognizer.label2id:
+            raise ValueError(f"canonical phone {phone!r} is not in the recognizer's vocabulary")
+        target_id_list.append(recognizer.label2id[phone])
+    target_ids = torch.tensor([target_id_list], dtype=torch.int64)
+
+    if log_probs.shape[1] < len(flat_phones):
+        raise ValueError(
+            f"audio too short ({log_probs.shape[1]} frames) for {len(flat_phones)} canonical phones"
+        )
     input_lengths = torch.tensor([log_probs.shape[1]], dtype=torch.int64)
     target_lengths = torch.tensor([len(flat_phones)], dtype=torch.int64)
 
     aligned, _scores = forced_align(log_probs, target_ids, input_lengths, target_lengths, blank=0)
     spans = _group_into_spans(aligned[0].tolist())
 
+    non_phone_ids = [
+        id_ for id_, label in recognizer.id2label.items() if label in NON_PHONE_TOKENS
+    ]
+    non_phone_mask = torch.zeros(log_probs.shape[-1])
+    non_phone_mask[non_phone_ids] = float("-inf")
+
     ops: list[PronunciationEditOp] = []
     frames = log_probs[0]  # (T, C)
     for i, (canonical_phone, (word, word_index)) in enumerate(
         zip(flat_phones, word_positions, strict=True)
     ):
-        if i >= len(spans):
-            continue  # repeated-adjacent-phone collapse — see _group_into_spans's docstring
+        assert i < len(spans), (
+            f"expected one span per canonical phone (forced_align should never produce fewer "
+            f"spans than target phones); got {len(spans)} spans for {len(flat_phones)} phones"
+        )
         token_id, frame_indices = spans[i]
         span_log_probs = frames[frame_indices]  # (num_frames, C)
         canonical_lp = span_log_probs[:, token_id]
-        best_lp, best_id = span_log_probs.max(dim=-1)
+
+        raw_best_ids = span_log_probs.argmax(dim=-1).tolist()
+        non_phone_frame_count = sum(1 for id_ in raw_best_ids if id_ in non_phone_ids)
+        if non_phone_frame_count * 2 > len(frame_indices):
+            ops.append(
+                PronunciationEditOp(
+                    word=word,
+                    wordIndex=word_index,
+                    op="del",
+                    expectedPhoneme=canonical_phone,
+                    spokenPhoneme=None,
+                )
+            )
+            continue
+
+        masked_span_log_probs = span_log_probs + non_phone_mask  # (num_frames, C)
+        best_lp, best_id = masked_span_log_probs.max(dim=-1)
         gop = (canonical_lp - best_lp).mean().item()
         most_likely_phone = recognizer.id2label[int(best_id.mode().values.item())]
 

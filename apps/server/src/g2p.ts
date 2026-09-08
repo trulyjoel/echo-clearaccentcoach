@@ -17,7 +17,7 @@ export interface CanonicalWord {
  * token. */
 const WORD_PATTERN = /[\p{L}\p{N}']+/gu;
 
-/** HuPER's Corrector only recognizes these 39 phones (excluding special tokens like `<PAD>`/
+/** HuPER's Recognizer only recognizes these 39 phones (excluding special tokens like `<PAD>`/
  * `<UNK>`), verified directly against the installed model's tokenizer — notably no `AO`, but does
  * include the flap allophone `DX`. */
 export const HUPER_VALID_PHONES = new Set([

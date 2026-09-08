@@ -5,11 +5,14 @@ class HuperRecognizer:
     """
 
     def __init__(self, repo_id: str = "huper29/huper_recognizer") -> None:
+        import torch
         from transformers import Wav2Vec2Processor, WavLMForCTC  # ty: ignore[unresolved-import]
 
         self.processor = Wav2Vec2Processor.from_pretrained(repo_id)
         self.model = WavLMForCTC.from_pretrained(repo_id)
         self.model.eval()
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model.to(self.device)
         self.label2id: dict[str, int] = dict(self.model.config.label2id)
         self.id2label: dict[int, str] = dict(self.model.config.id2label)
 
@@ -20,6 +23,7 @@ class HuperRecognizer:
         import torch.nn.functional as F
 
         inputs = self.processor(waveform, sampling_rate=16000, return_tensors="pt")
+        inputs = {key: value.to(self.device) for key, value in inputs.items()}
         with torch.no_grad():
             logits = self.model(**inputs).logits
-        return F.log_softmax(logits, dim=-1)
+        return F.log_softmax(logits, dim=-1).cpu()
