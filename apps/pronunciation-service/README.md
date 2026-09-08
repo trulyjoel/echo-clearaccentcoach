@@ -1,7 +1,10 @@
 # apps/pronunciation-service
 
-Modal-hosted HuPER Corrector service. See
-`docs/superpowers/specs/2026-09-05-pronunciation-service-modal-design.md` for the design.
+Modal-hosted pronunciation-scoring service, using `huper29/huper_recognizer` and
+Goodness-of-Pronunciation scoring. See
+`docs/superpowers/specs/2026-09-05-pronunciation-service-modal-design.md` (original service
+scaffolding) and `docs/superpowers/specs/2026-09-08-gop-pronunciation-scoring-design.md` (the
+current scoring approach) for the design.
 
 ## Local development
 
