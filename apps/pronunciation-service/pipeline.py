@@ -13,13 +13,15 @@ _NO_INSERTION = {"<NONE>", "NONE", "<PAD>"}
 
 def _group_into_spans(aligned_frame_tokens: list[int]) -> list[tuple[int, list[int]]]:
     """Groups consecutive identical non-blank frame token ids into (token_id, frame_indices)
-    spans, in target order — forced_align guarantees monotonic left-to-right target consumption,
-    so this never needs to look ahead or reorder anything."""
+    spans, in target order — forced_align guarantees monotonic left-to-right target consumption.
+    Only merges a frame into the previous span when it is truly contiguous with that span's last
+    frame (no intervening blank) — a blank-separated repeat of the same phone (e.g. two distinct
+    occurrences at a word boundary) must produce two separate spans, not one."""
     spans: list[tuple[int, list[int]]] = []
     for t, token_id in enumerate(aligned_frame_tokens):
         if token_id == 0:  # blank
             continue
-        if spans and spans[-1][0] == token_id:
+        if spans and spans[-1][0] == token_id and spans[-1][1][-1] == t - 1:
             spans[-1][1].append(t)
         else:
             spans.append((token_id, [t]))

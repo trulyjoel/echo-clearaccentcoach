@@ -176,6 +176,13 @@ def test_group_into_spans_collapses_a_repeated_adjacent_phone_with_no_blank_betw
     assert _group_into_spans([0, 7, 7, 7, 0]) == [(7, [1, 2, 3])]
 
 
+def test_group_into_spans_keeps_a_blank_separated_repeat_as_two_spans():
+    # Two distinct occurrences of the same phone with a real blank frame between them (e.g. two
+    # words meeting at a boundary, "big guy") must stay two spans, not collapse into one just
+    # because the token id matches the previous span's — that's the bug this test guards against.
+    assert _group_into_spans([0, 5, 0, 5, 0]) == [(5, [1]), (5, [3])]
+
+
 # A tiny synthetic vocabulary — not real ARPAbet ids — sized just large enough to construct
 # hand-picked log-probability rows with a known, predictable GOP outcome per phone. id 0 is
 # always blank, matching the real recognizer's convention.
@@ -261,3 +268,52 @@ def test_score_pronunciation_ignores_a_mismatch_above_threshold():
 
     # GOP = log(0.2) - log(0.4472) ≈ -0.80, well above the -3.0 threshold.
     assert score_pronunciation(recognizer, None, canonical) == []
+
+
+def test_score_pronunciation_scores_the_trailing_phone_after_a_blank_separated_repeat():
+    # Regression test for the _group_into_spans bug where a blank-separated repeat of the same
+    # phone across a word boundary (e.g. "big guy" — B ends "big", B starts "guy") collapsed into
+    # one span. That shifted every subsequent canonical phone out of alignment with `spans`, and
+    # dropped the trailing phone off the end entirely (silently skipped by the `i >= len(spans)`
+    # guard). Uses its own tiny vocabulary — id 0 is blank, matching the real recognizer's
+    # convention — sized to a minimal 4-frame recording where the frame count exactly matches the
+    # forced-alignment's minimum required length for "B, B, AY" (3 target phones plus one
+    # mandatory blank separator between the adjacent duplicate B's), leaving no alignment freedom:
+    # frame 0 -> first B, frame 1 -> the mandatory blank, frame 2 -> second B, frame 3 -> AY.
+    id2label = {0: "<pad>", 1: "B", 2: "AY", 3: "X"}
+    label2id = {label: id_ for id_, label in id2label.items()}
+
+    def row(probs: dict[str, float]) -> list[float]:
+        return [probs.get(id2label[i], 1e-9) for i in range(len(id2label))]
+
+    rows = [
+        row({"B": 0.97, "AY": 0.01, "X": 0.01, "<pad>": 0.01}),  # frame 0: confidently "big"'s B
+        row({"<pad>": 0.97, "B": 0.01, "AY": 0.01, "X": 0.01}),  # frame 1: mandatory blank
+        row({"B": 0.97, "AY": 0.01, "X": 0.01, "<pad>": 0.01}),  # frame 2: confidently "guy"'s B
+        row({"X": 0.97, "AY": 0.01, "B": 0.01, "<pad>": 0.01}),  # frame 3: mispronounced AY as X
+    ]
+    log_probs = torch.log(torch.tensor([rows], dtype=torch.float32))
+
+    class _FakeRecognizer:
+        def __init__(self) -> None:
+            self.label2id = label2id
+            self.id2label = id2label
+
+        def log_probs(self, waveform: object) -> torch.Tensor:
+            return log_probs
+
+    canonical = [
+        CanonicalWord(word="big", phones=["B"]),
+        CanonicalWord(word="guy", phones=["B", "AY"]),
+    ]
+
+    ops = score_pronunciation(_FakeRecognizer(), None, canonical)
+
+    # Both B's are correctly not flagged (each confidently matches its own span) — only the
+    # trailing AY, which the bug used to drop instead of scoring, is reported.
+    assert len(ops) == 1
+    assert ops[0].word == "guy"
+    assert ops[0].wordIndex == 1
+    assert ops[0].op == "sub"
+    assert ops[0].expectedPhoneme == "AY"
+    assert ops[0].spokenPhoneme == "X"
