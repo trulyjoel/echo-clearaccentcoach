@@ -72,12 +72,9 @@ def test_group_into_spans_keeps_a_blank_separated_repeat_as_two_spans():
 
 # A tiny synthetic vocabulary — not real ARPAbet ids — sized just large enough to construct
 # hand-picked log-probability rows with a known, predictable GOP outcome per phone. id 0 is
-# always blank, matching the real recognizer's convention. Uses the real recognizer's exact
-# blank spelling ("<pad>", lowercase) deliberately — this fake vocabulary predates Fix 2's
-# NON_PHONE_TOKENS set (which matches the real huper29/huper_recognizer's uppercase "<PAD>") and
-# none of these existing tests' fixtures have blank/special tokens competing for "best", so the
-# case mismatch is harmless here; see the lowercase-vs-uppercase note on the new deletion/masking
-# tests below, which use their own vocabularies with the real, uppercase spelling.
+# always blank, matching the real recognizer's convention. Uses lowercase "<pad>" as its own
+# self-consistent spelling — each fake recognizer declares its own non_phone_tokens matching its
+# own vocabulary, so no other fake's spelling needs to agree with this one.
 _ID2LABEL = {0: "<pad>", 1: "D", 2: "DX", 3: "V", 4: "B"}
 _LABEL2ID = {label: id_ for id_, label in _ID2LABEL.items()}
 
@@ -91,6 +88,7 @@ class FakeRecognizer:
         self.label2id = _LABEL2ID
         self.id2label = _ID2LABEL
         self.non_phone_tokens = frozenset({"<pad>"})
+        self.acceptable_realizations = {"D": {"DX"}}
 
     def log_probs(self, waveform: object) -> torch.Tensor:
         return self._log_probs
@@ -107,9 +105,7 @@ def _log_probs_tensor(rows: list[list[float]]) -> torch.Tensor:
 
 def test_score_pronunciation_reports_nothing_for_a_confident_correct_phone():
     # Two frames, both overwhelmingly "D" — matches the canonical phone throughout.
-    log_probs = _log_probs_tensor(
-        [_row({"D": 0.985, "DX": 0.005, "V": 0.005, "<pad>": 0.005})] * 2
-    )
+    log_probs = _log_probs_tensor([_row({"D": 0.985, "DX": 0.005, "V": 0.005, "<pad>": 0.005})] * 2)
     recognizer = FakeRecognizer(log_probs)
     canonical = [CanonicalWord(word="do", phones=["D"])]
 
@@ -122,9 +118,7 @@ def test_score_pronunciation_reports_nothing_for_a_confident_correct_phone():
 def test_score_pronunciation_flags_a_confident_substitution():
     # Two frames, both overwhelmingly "B" where "V" was canonical — the exact V/B case this
     # whole design exists to catch.
-    log_probs = _log_probs_tensor(
-        [_row({"B": 0.985, "V": 0.005, "D": 0.005, "<pad>": 0.005})] * 2
-    )
+    log_probs = _log_probs_tensor([_row({"B": 0.985, "V": 0.005, "D": 0.005, "<pad>": 0.005})] * 2)
     recognizer = FakeRecognizer(log_probs)
     canonical = [CanonicalWord(word="very", phones=["V"])]
 
@@ -141,9 +135,7 @@ def test_score_pronunciation_flags_a_confident_substitution():
 def test_score_pronunciation_allows_a_flap_as_an_acceptable_realization_of_d():
     # Confidently "DX", not "D" — but DX is an allowlisted realization of D (flapping), so this
     # must not be reported even though raw GOP would be strongly negative.
-    log_probs = _log_probs_tensor(
-        [_row({"DX": 0.985, "D": 0.005, "V": 0.005, "<pad>": 0.005})] * 2
-    )
+    log_probs = _log_probs_tensor([_row({"DX": 0.985, "D": 0.005, "V": 0.005, "<pad>": 0.005})] * 2)
     recognizer = FakeRecognizer(log_probs)
     canonical = [CanonicalWord(word="good", phones=["D"])]
 
@@ -192,6 +184,7 @@ def test_score_pronunciation_scores_the_trailing_phone_after_a_blank_separated_r
             self.label2id = label2id
             self.id2label = id2label
             self.non_phone_tokens = frozenset({"<pad>"})
+            self.acceptable_realizations = {}
 
         def log_probs(self, waveform: object) -> torch.Tensor:
             return log_probs
@@ -242,8 +235,9 @@ def test_score_pronunciation_raises_when_audio_is_too_short_for_the_phone_count(
 
 
 # These two tests use their own local vocabularies with the real recognizer's uppercase special-
-# token spelling ("<PAD>", matching NON_PHONE_TOKENS) rather than the shared _ID2LABEL above (which
-# uses lowercase "<pad>" and predates the deletion/masking fix — see the note on _ID2LABEL).
+# token spelling ("<PAD>") rather than the shared _ID2LABEL above (which uses lowercase "<pad>") —
+# each fake declares its own matching non_phone_tokens, so the two vocabularies never need to
+# agree with each other.
 _DEL_ID2LABEL = {0: "<PAD>", 1: "D", 2: "DX", 3: "V", 4: "B"}
 _DEL_LABEL2ID = {label: id_ for id_, label in _DEL_ID2LABEL.items()}
 
@@ -261,6 +255,7 @@ class _PadVocabFakeRecognizer:
         self.label2id = _DEL_LABEL2ID
         self.id2label = _DEL_ID2LABEL
         self.non_phone_tokens = frozenset({"<PAD>"})
+        self.acceptable_realizations = {}
 
     def log_probs(self, waveform: object) -> torch.Tensor:
         return self._log_probs

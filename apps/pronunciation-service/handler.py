@@ -51,7 +51,12 @@ def handle_score_request(
             comparison_ops = score_pronunciation(
                 comparison_recognizer, waveform, to_ipa_phones(words)
             )
-            logger.info("comparison scoring: %s", comparison_ops)
+            logger.info(
+                "comparison scoring: words=%s served=%s comparison=%s",
+                [word.word for word in words],
+                edit_ops,
+                comparison_ops,
+            )
         except Exception:
             logger.exception("comparison scoring failed")
     finally:

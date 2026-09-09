@@ -11,6 +11,18 @@ class HuperRecognizer:
     # HuPER's vocabulary spelling and must not be assumed to match any other model's.
     non_phone_tokens: frozenset[str] = frozenset({"<PAD>", "<UNK>", "<BOS>", "<EOS>", "|"})
 
+    # Phones tolerated as an acceptable realization of the canonical phone, checked before
+    # threshold-based scoring — mirrors g2p.ts's PHONE_NORMALIZATION idea (normalize known
+    # variation) applied to a different problem. DX (the alveolar flap) is the normal realization
+    # of an intervocalic /t/ or /d/ in fluent American English ("butter", "good day") — flagging
+    # it as a mispronunciation of D or T produced exactly this false positive on a fluent native
+    # recording during this feature's investigation. Starts narrow; grows only from real observed
+    # false positives, not speculatively.
+    acceptable_realizations: dict[str, set[str]] = {
+        "D": {"DX"},
+        "T": {"DX"},
+    }
+
     def __init__(self, repo_id: str = "huper29/huper_recognizer") -> None:
         import torch
         from transformers import Wav2Vec2Processor, WavLMForCTC  # ty: ignore[unresolved-import]
@@ -45,6 +57,13 @@ class Wav2Vec2XlsrRecognizer:
     phonemizer's text-to-phoneme encoding).
     """
 
+    # Mirrors HuPER's D/T-flap tolerance above, in this model's lowercase IPA vocabulary — ɾ is
+    # the flap symbol (see arpabet_to_ipa.py's DX -> ɾ mapping).
+    acceptable_realizations: dict[str, set[str]] = {
+        "d": {"ɾ"},
+        "t": {"ɾ"},
+    }
+
     def __init__(self, repo_id: str = "facebook/wav2vec2-xlsr-53-espeak-cv-ft") -> None:
         import json
 
@@ -58,6 +77,10 @@ class Wav2Vec2XlsrRecognizer:
         self.feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(repo_id)
         self.model = Wav2Vec2ForCTC.from_pretrained(repo_id)
         self.model.eval()
+        assert self.model.config.pad_token_id == 0, (
+            "score_pronunciation's forced_align call hardcodes blank=0 — this recognizer's "
+            "pad/blank token must be id 0 for that to be correct"
+        )
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(self.device)
 
@@ -70,11 +93,13 @@ class Wav2Vec2XlsrRecognizer:
         # string content. vocab.json's ids 0-3 turned out to be the distinct strings "<pad>",
         # "<s>", "</s>", "<unk>" (392 total entries, no collapse) — reading them back out through
         # id2label is correct regardless, so no assumption about their literal spelling is baked
-        # in here.
+        # in here. unk_token_id isn't a Wav2Vec2Config field, so it's read off the model config
+        # with a default of None (mirrors HuPER's non_phone_tokens including "<UNK>").
         non_phone_ids = {
             self.model.config.pad_token_id,
             self.model.config.bos_token_id,
             self.model.config.eos_token_id,
+            getattr(self.model.config, "unk_token_id", None),
         }
         self.non_phone_tokens: frozenset[str] = frozenset(
             self.id2label[id_] for id_ in non_phone_ids if id_ in self.id2label

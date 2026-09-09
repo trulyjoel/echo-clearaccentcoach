@@ -4,6 +4,7 @@ import os
 import modal
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 
+from arpabet_to_ipa import ARPABET_TO_IPA
 from handler import InvalidRequestError, UnauthorizedError, handle_score_request
 from models import HuperRecognizer, Wav2Vec2XlsrRecognizer
 from schemas import ScoreResponse
@@ -12,6 +13,11 @@ from schemas import ScoreResponse
 # handler.py, which is a library module other things import. Without this, the root logger's
 # default WARNING level silently drops handler.py's INFO-level comparison-scoring log line.
 logging.basicConfig(level=logging.INFO)
+# Belt-and-braces: if a future Modal SDK version installs its own root handler before this module
+# runs, basicConfig above becomes a no-op (it only configures when no handler exists yet), which
+# would silently reintroduce the exact bug this logging setup exists to fix. Setting handler.py's
+# logger level directly is independent of the root logger's configuration state.
+logging.getLogger("handler").setLevel(logging.INFO)
 
 
 def _download_recognizer() -> None:
@@ -66,6 +72,15 @@ class PronunciationService:
     def load(self) -> None:
         self.recognizer = HuperRecognizer()
         self.comparison_recognizer = Wav2Vec2XlsrRecognizer()
+        # Without this, a wrong ARPABET_TO_IPA entry silently drops every turn's comparison result
+        # forever (score_pronunciation raises ValueError, handler.py's try/except only logs it) —
+        # indistinguishable in logs from "no mispronunciation found." Fail loud at deploy time
+        # instead.
+        missing = set(ARPABET_TO_IPA.values()) - set(self.comparison_recognizer.label2id)
+        assert not missing, (
+            f"ARPABET_TO_IPA maps IPA symbols missing from comparison recognizer's vocabulary: "
+            f"{missing}"
+        )
 
     @modal.asgi_app()
     def web(self) -> FastAPI:

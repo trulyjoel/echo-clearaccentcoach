@@ -37,8 +37,9 @@ ARPABET_TO_IPA: dict[str, str] = {
     "OW": "oʊ",
     "OY": "ɔɪ",
     "P": "p",
-    # The canonical English approximant, not the trill "r" — see this module's docstring on
-    # to_ipa_phones and the test above for why this direction matters.
+    # The canonical English approximant, not the trill "r" — see
+    # test_to_ipa_phones_maps_r_to_the_english_approximant_not_the_trill in
+    # tests/test_arpabet_to_ipa.py for why this direction matters.
     "R": "ɹ",
     "S": "s",
     "SH": "ʃ",

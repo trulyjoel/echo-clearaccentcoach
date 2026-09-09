@@ -28,18 +28,6 @@ def _group_into_spans(aligned_frame_tokens: list[int]) -> list[tuple[int, list[i
 
 GOP_MISPRONUNCIATION_THRESHOLD = -3.0
 
-# Phones tolerated as an acceptable realization of the canonical phone, checked before
-# threshold-based scoring — mirrors g2p.ts's PHONE_NORMALIZATION idea (normalize known variation)
-# applied to a different problem. DX (the alveolar flap) is the normal realization of an
-# intervocalic /t/ or /d/ in fluent American English ("butter", "good day") — flagging it as a
-# mispronunciation of D or T produced exactly this false positive on a fluent native recording
-# during this feature's investigation. Starts narrow; grows only from real observed false
-# positives, not speculatively.
-ACCEPTABLE_REALIZATIONS: dict[str, set[str]] = {
-    "D": {"DX"},
-    "T": {"DX"},
-}
-
 
 class Recognizer(Protocol):
     """What score_pronunciation needs from a phone-recognition model — satisfied structurally by
@@ -49,6 +37,7 @@ class Recognizer(Protocol):
     label2id: dict[str, int]
     id2label: dict[int, str]
     non_phone_tokens: frozenset[str]
+    acceptable_realizations: dict[str, set[str]]
 
     def log_probs(self, waveform) -> torch.Tensor:
         """Returns log-softmax'd per-frame class log-probabilities, shape (1, T, C)."""
@@ -63,7 +52,7 @@ def score_pronunciation(
     """Forced-aligns `canonical_phones` to `recognizer`'s emissions for `waveform` (a 16kHz mono
     array — see Task 4's `load_waveform` for how a real one is produced), then reports a
     substitution for any phone whose Goodness-of-Pronunciation score falls below threshold and
-    isn't an accepted allophonic variant (see ACCEPTABLE_REALIZATIONS).
+    isn't an accepted allophonic variant (see `recognizer.acceptable_realizations`).
 
     Does not detect insertions (forced alignment can't represent an extra, non-canonical phone —
     see the design spec's Non-goals) or, in the rare case of two identical adjacent canonical
@@ -136,7 +125,7 @@ def score_pronunciation(
         gop = (canonical_lp - best_lp).mean().item()
         most_likely_phone = recognizer.id2label[int(best_id.mode().values.item())]
 
-        if most_likely_phone in ACCEPTABLE_REALIZATIONS.get(canonical_phone, set()):
+        if most_likely_phone in recognizer.acceptable_realizations.get(canonical_phone, set()):
             continue
         if gop < GOP_MISPRONUNCIATION_THRESHOLD:
             ops.append(
