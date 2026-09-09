@@ -26,6 +26,7 @@
     "ai": "7.0.31",
     "drizzle-orm": "0.45.2",
     "fastify": "5.10.0",
+    "phonemize": "1.2.0",
     "postgres": "3.4.9",
     "zod": "4.4.3"
   },

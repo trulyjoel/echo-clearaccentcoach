@@ -11,28 +11,37 @@ vi.mock("@clerk/react", () => ({
   UserButton: () => <div>User menu</div>,
 }));
 
+function statusResponse(overrides: { consentGivenAt: string | null }): string {
+  return JSON.stringify({
+    consentGivenAt: overrides.consentGivenAt,
+    name: null,
+    l1: null,
+    proficiency: null,
+    context: null,
+    goals: null,
+  });
+}
+
 describe("AuthenticatedApp", () => {
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
-  it("shows onboarding for a first-login user with no l1/consent on record", async () => {
+  it("shows onboarding for a first-login user with no consent on record", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify({ l1: null, consentGivenAt: null }), { status: 200 }),
+      new Response(statusResponse({ consentGivenAt: null }), { status: 200 }),
     );
 
     render(<AuthenticatedApp />);
 
     await waitFor(() => {
-      expect(screen.getByText("What's your native language?")).toBeInTheDocument();
+      expect(screen.getByText("Recording consent")).toBeInTheDocument();
     });
   });
 
-  it("shows Home directly for a returning user who already onboarded", async () => {
+  it("shows Home directly once consent is on record, even if the rest of the profile isn't set", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify({ l1: "spanish", consentGivenAt: "2026-07-01T00:00:00.000Z" }), {
-        status: 200,
-      }),
+      new Response(statusResponse({ consentGivenAt: "2026-07-01T00:00:00.000Z" }), { status: 200 }),
     );
 
     render(<AuthenticatedApp />);
@@ -40,7 +49,7 @@ describe("AuthenticatedApp", () => {
     await waitFor(() => {
       expect(screen.getByText("Kalli")).toBeInTheDocument();
     });
-    expect(screen.queryByText("What's your native language?")).not.toBeInTheDocument();
+    expect(screen.queryByText("Recording consent")).not.toBeInTheDocument();
   });
 
   it("shows an error message when the onboarding status request fails", async () => {
@@ -53,29 +62,24 @@ describe("AuthenticatedApp", () => {
     });
   });
 
-  it("shows Home once onboarding completes", async () => {
+  it("shows Home once consent is given", async () => {
     const user = userEvent.setup();
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ l1: null, consentGivenAt: null }), { status: 200 }),
-      )
+      .mockResolvedValueOnce(new Response(statusResponse({ consentGivenAt: null }), { status: 200 }))
       .mockResolvedValueOnce(new Response(null, { status: 200 }))
       .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({ l1: "spanish", consentGivenAt: "2026-07-16T00:00:00.000Z" }),
-          { status: 200 },
-        ),
+        new Response(statusResponse({ consentGivenAt: "2026-07-16T00:00:00.000Z" }), {
+          status: 200,
+        }),
       )
       .mockResolvedValueOnce(new Response(JSON.stringify({ userId: "user_123" }), { status: 200 }));
 
     render(<AuthenticatedApp />);
     await waitFor(() => {
-      expect(screen.getByText("What's your native language?")).toBeInTheDocument();
+      expect(screen.getByText("Recording consent")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByLabelText("Spanish"));
-    await user.click(screen.getByRole("button", { name: "Continue" }));
     await user.click(
       screen.getByLabelText("I consent to my voice being recorded and stored for this purpose."),
     );
@@ -89,7 +93,7 @@ describe("AuthenticatedApp", () => {
 
   it("resolves onboarding status under StrictMode's double-invoked effects", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify({ l1: null, consentGivenAt: null }), { status: 200 }),
+      new Response(statusResponse({ consentGivenAt: null }), { status: 200 }),
     );
 
     render(
@@ -99,7 +103,7 @@ describe("AuthenticatedApp", () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByText("What's your native language?")).toBeInTheDocument();
+      expect(screen.getByText("Recording consent")).toBeInTheDocument();
     });
   });
 });

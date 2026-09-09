@@ -1,0 +1,40 @@
+# apps/pronunciation-service
+
+Modal-hosted pronunciation-scoring service, using `huper29/huper_recognizer` and
+Goodness-of-Pronunciation scoring. See
+`docs/superpowers/specs/2026-09-05-pronunciation-service-modal-design.md` (original service
+scaffolding) and `docs/superpowers/specs/2026-09-08-gop-pronunciation-scoring-design.md` (the
+current scoring approach) for the design.
+
+Since 2026-09-08, every scored turn is also scored against
+`facebook/wav2vec2-xlsr-53-espeak-cv-ft` for comparison — logged only, never served to the app. See
+`docs/superpowers/specs/2026-09-08-wav2vec2-xlsr53-comparison-scoring-design.md` for why.
+
+## Local development
+
+```bash
+uv sync
+uv run pytest
+uv run ruff check .
+uv run ty check .
+```
+
+## Deploying
+
+```bash
+uv run modal deploy modal_app.py
+```
+
+Run it via `uv run` — `modal_app.py` imports `fastapi` at module load time (needed locally to define
+the app before it ships to the container), so it must run inside this project's `uv`-managed venv,
+not a bare `modal` install.
+
+Prints a URL ending in `.modal.run` — set that as `PRONUNCIATION_SERVICE_URL` in `apps/server`'s
+Fly secrets (`fly secrets set PRONUNCIATION_SERVICE_URL=...`).
+
+## Secrets
+
+- `pronunciation-service-auth` (Modal secret, holds `PRONUNCIATION_SERVICE_TOKEN`): create with
+  `uv run modal secret create pronunciation-service-auth PRONUNCIATION_SERVICE_TOKEN=<token>`. The
+  same token value must also be set as `PRONUNCIATION_SERVICE_TOKEN` in `apps/server`'s Fly secrets
+  — this service and `apps/server` share one static bearer token, checked on every `/score` request.

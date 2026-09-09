@@ -11,13 +11,20 @@ export type L1 = SupportedL1 | "other";
 
 export const L1_VALUES = [...SUPPORTED_L1S, "other"] as const;
 
+export const PROFICIENCY_LEVELS = ["beginner", "intermediate", "advanced"] as const;
+
+export type ProficiencyLevel = (typeof PROFICIENCY_LEVELS)[number];
+
 export interface OnboardingStatusResponse {
-  l1: L1 | null;
   consentGivenAt: string | null;
+  name: string | null;
+  l1: L1 | null;
+  proficiency: ProficiencyLevel | null;
+  context: string | null;
+  goals: string | null;
 }
 
 export interface OnboardingRequest {
-  l1: L1;
   consent: boolean;
 }
 
@@ -50,6 +57,36 @@ export interface PersistedError extends DetectedError {
   hasClip: boolean;
   /** Whether the clip is exempted from the 90-day expiry (ticket 13). Meaningless if !hasClip. */
   bookmarked: boolean;
+}
+
+/** The three kinds of deviation a phoneme-level pronunciation diff can find, relative to the
+ * canonical (target-accent) phone at a given position. */
+export const PRONUNCIATION_EDIT_OPS = ["sub", "del", "ins"] as const;
+
+export type PronunciationEditOpKind = (typeof PRONUNCIATION_EDIT_OPS)[number];
+
+export const PRONUNCIATION_ERROR_SOURCES = ["audio", "transcript_revision"] as const;
+
+export type PronunciationErrorSource = (typeof PRONUNCIATION_ERROR_SOURCES)[number];
+
+/** One detected pronunciation deviation for a single word in a turn — e.g. a substituted phoneme
+ * (an L2 /l/-for-/r/ swap), a dropped phoneme, or an inserted one. `source` distinguishes HuPER's
+ * audio-verified detections from ones inferred purely from Flux revising its own transcript
+ * mid-turn (see docs/superpowers/specs/2026-09-05-flux-transcript-revision-detection-design.md). */
+export interface DetectedPronunciationError {
+  word: string;
+  op: PronunciationEditOpKind;
+  /** The canonical phoneme, or `null` for an inserted phone with no canonical counterpart. */
+  expectedPhoneme: string | null;
+  /** The phoneme actually realized in the audio, or `null` for a deletion (nothing was spoken in
+   * its place). */
+  spokenPhoneme: string | null;
+  source: PronunciationErrorSource;
+}
+
+/** A `DetectedPronunciationError` once persisted, addressable for the correction panel. */
+export interface PersistedPronunciationError extends DetectedPronunciationError {
+  id: string;
 }
 
 /** A past session as listed in the error-history view (ticket 14). */
@@ -99,11 +136,25 @@ export type ServerToClientMessage =
   | { type: "transcript"; text: string; isFinal: boolean }
   | { type: "end_of_turn" }
   | { type: "turn_errors"; turnId: string; createdAt: string; errors: PersistedError[] }
+  | {
+      type: "turn_pronunciation_errors";
+      turnId: string;
+      createdAt: string;
+      errors: PersistedPronunciationError[];
+    }
   | { type: "reply_text_delta"; text: string }
   | { type: "reply_text"; text: string }
   | { type: "reply_audio_end" }
   | { type: "reply_interrupted"; reason: "barge_in" | "error" }
   | { type: "session_ended"; reason: SessionEndReason }
+  | {
+      type: "profile_updated";
+      name: string;
+      l1: L1;
+      proficiency: ProficiencyLevel;
+      context: string;
+      goals: string;
+    }
   | { type: "error"; message: string };
 
 /**

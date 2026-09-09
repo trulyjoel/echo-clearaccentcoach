@@ -332,6 +332,21 @@ describe("synthesizeInworld", () => {
     expect(model).toBe("inworld-tts-2");
   });
 
+  it("prefers an explicit modelOverride over INWORLD_MODEL", async () => {
+    process.env["INWORLD_API_KEY"] = "test-key";
+    process.env["INWORLD_MODEL"] = "inworld-tts-1.5-mini";
+    let capturedInit: RequestInit | undefined;
+    global.fetch = vi.fn(async (_url: string | URL, init?: RequestInit) => {
+      capturedInit = init;
+      return ndjsonResponseFromRawChunks([]);
+    }) as unknown as typeof fetch;
+
+    const { model } = await synthesizeInworld("hi", "Sarah", "inworld-tts-2");
+
+    expect(JSON.parse(capturedInit?.body as string)).toMatchObject({ modelId: "inworld-tts-2" });
+    expect(model).toBe("inworld-tts-2");
+  });
+
   it("throws when a stream line contains an error field", async () => {
     process.env["INWORLD_API_KEY"] = "test-key";
     const line = JSON.stringify({ error: { message: "bad voice" } });
@@ -450,5 +465,27 @@ describe("getTTSProvider", () => {
     const { model } = await getTTSProvider().synthesize("hi");
 
     expect(model).toBe("inworld-tts-2-flash");
+  });
+
+  it("routes Inworld to the full model when highQuality is set", async () => {
+    process.env["TTS_PROVIDER"] = "inworld";
+    process.env["INWORLD_API_KEY"] = "test-key";
+    global.fetch = vi.fn(
+      async () =>
+        new Response("", { status: 200, headers: { "content-type": "application/x-ndjson" } }),
+    ) as unknown as typeof fetch;
+
+    const { model } = await getTTSProvider({ highQuality: true }).synthesize("hi");
+
+    expect(model).toBe("inworld-tts-2");
+  });
+
+  it("ignores highQuality for providers with no quality tier", async () => {
+    process.env["DEEPINFRA_API_KEY"] = "test-key";
+    global.fetch = vi.fn(async () => fetchResponseFromChunks([])) as unknown as typeof fetch;
+
+    await getTTSProvider({ highQuality: true }).synthesize("hi");
+
+    expect(global.fetch).toHaveBeenCalledTimes(1);
   });
 });

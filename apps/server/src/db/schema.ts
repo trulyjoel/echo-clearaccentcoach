@@ -1,11 +1,23 @@
-import { ERROR_CATEGORIES, L1_VALUES, SESSION_END_REASONS } from "@kalli/types";
+import {
+  ERROR_CATEGORIES,
+  L1_VALUES,
+  PROFICIENCY_LEVELS,
+  PRONUNCIATION_EDIT_OPS,
+  PRONUNCIATION_ERROR_SOURCES,
+  SESSION_END_REASONS,
+} from "@kalli/types";
 import { boolean, integer, pgEnum, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
 
 export const l1Enum = pgEnum("l1", [...L1_VALUES]);
+export const proficiencyEnum = pgEnum("proficiency", [...PROFICIENCY_LEVELS]);
 
 export const profiles = pgTable("profiles", {
   clerkUserId: text("clerk_user_id").primaryKey(),
+  name: text("name"),
   l1: l1Enum("l1"),
+  proficiency: proficiencyEnum("proficiency"),
+  context: text("context"),
+  goals: text("goals"),
   consentGivenAt: timestamp("consent_given_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
@@ -51,6 +63,24 @@ export const turnErrors = pgTable("turn_errors", {
   corrected: text("corrected").notNull(),
   explanation: text("explanation").notNull(),
   audioClipId: uuid("audio_clip_id").references(() => audioClips.id, { onDelete: "set null" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const pronunciationEditOpEnum = pgEnum("pronunciation_edit_op", [...PRONUNCIATION_EDIT_OPS]);
+export const pronunciationErrorSourceEnum = pgEnum("pronunciation_error_source", [
+  ...PRONUNCIATION_ERROR_SOURCES,
+]);
+
+export const turnPronunciationErrors = pgTable("turn_pronunciation_errors", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  turnId: uuid("turn_id")
+    .notNull()
+    .references(() => turns.id),
+  word: text("word").notNull(),
+  op: pronunciationEditOpEnum("op").notNull(),
+  expectedPhoneme: text("expected_phoneme"),
+  spokenPhoneme: text("spoken_phoneme"),
+  source: pronunciationErrorSourceEnum("source").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

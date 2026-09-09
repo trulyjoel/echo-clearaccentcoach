@@ -14,27 +14,12 @@ describe("Onboarding", () => {
     vi.restoreAllMocks();
   });
 
-  it("requires an l1 selection before continuing to consent", async () => {
-    const user = userEvent.setup();
-    render(<Onboarding onComplete={vi.fn()} />);
-
-    expect(screen.getByRole("button", { name: "Continue" })).toBeDisabled();
-
-    await user.click(screen.getByLabelText("Spanish"));
-    expect(screen.getByRole("button", { name: "Continue" })).toBeEnabled();
-
-    await user.click(screen.getByRole("button", { name: "Continue" }));
-    expect(screen.getByText("Recording consent")).toBeInTheDocument();
-  });
-
-  it("requires explicit consent before submitting, then posts l1 + consent", async () => {
+  it("requires explicit consent before submitting, then posts consent only", async () => {
     const user = userEvent.setup();
     const onComplete = vi.fn();
     vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 200 }));
 
     render(<Onboarding onComplete={onComplete} />);
-    await user.click(screen.getByLabelText("Mandarin Chinese"));
-    await user.click(screen.getByRole("button", { name: "Continue" }));
 
     const submit = screen.getByRole("button", { name: "Start practicing" });
     expect(submit).toBeDisabled();
@@ -54,7 +39,7 @@ describe("Onboarding", () => {
       expect.objectContaining({
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
-        body: JSON.stringify({ l1: "mandarin", consent: true }),
+        body: JSON.stringify({ consent: true }),
       }),
     );
   });
@@ -65,8 +50,6 @@ describe("Onboarding", () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 500 }));
 
     render(<Onboarding onComplete={onComplete} />);
-    await user.click(screen.getByLabelText("Other"));
-    await user.click(screen.getByRole("button", { name: "Continue" }));
     await user.click(
       screen.getByLabelText("I consent to my voice being recorded and stored for this purpose."),
     );

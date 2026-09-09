@@ -1,8 +1,11 @@
 import type {
   ClientToServerMessage,
   DetectedError,
+  DetectedPronunciationError,
   L1,
   PersistedError,
+  PersistedPronunciationError,
+  ProficiencyLevel,
   ServerToClientMessage,
   SessionEndReason,
 } from "@kalli/types";
@@ -12,12 +15,20 @@ import { AsyncQueue } from "../asyncQueue.js";
 import { storeTurnClip } from "../audioClips.js";
 import { getAuthenticatedUserId } from "../auth.js";
 import { db } from "../db/client.js";
-import { profiles, sessions, turnErrors, turns } from "../db/schema.js";
+import { profiles, sessions, turnErrors, turnPronunciationErrors, turns } from "../db/schema.js";
 import type { DeepgramConnection } from "../deepgram.js";
 import { DEEPGRAM_MODEL, openDeepgramConnection } from "../deepgram.js";
-import type { AnalysisResult, ConversationMessage, TokenUsage } from "../llm.js";
-import { getLLMProvider, pickGreeting } from "../llm.js";
+import { createMarkerResolver } from "../emphasisMarkers.js";
+import { g2p } from "../g2p.js";
+import type { ConversationMessage, TokenUsage } from "../llm.js";
+import { buildReplySystemPrompt, getAnalysisModelId, getLLMProvider, pickGreeting } from "../llm.js";
+import { extractOnboardingAnswer, extractOnboardingConfirmation } from "../onboarding/extract.js";
+import type { OnboardingResult, OnboardingState } from "../onboarding/flow.js";
+import { startOnboarding, submitAnswer, submitConfirmation } from "../onboarding/flow.js";
 import { containsDisallowedContent } from "../outputGuard.js";
+import type { PronunciationEditOp } from "../pronunciation.js";
+import { getPronunciationProvider } from "../pronunciation.js";
+import { detectAsrSmoothedDeviations } from "../pronunciationRevisionDetector.js";
 import { getMaxSessionDurationMs, hasReachedDailySessionCap } from "../sessionLimits.js";
 import { splitSentences } from "../sentenceSplitter.js";
 import { getTTSProvider } from "../tts.js";
@@ -47,19 +58,148 @@ async function requireAuthenticatedUser(
  */
 const MAX_TRANSCRIPT_LENGTH = 4000;
 
+/**
+ * Learner-supplied onboarding fields (name, context, goals) are interpolated into the reply
+ * system prompt with no other bound — this caps them before they're persisted or used to build
+ * that prompt.
+ */
+const MAX_PROFILE_FIELD_LENGTH = 200;
+
+interface CompleteProfile {
+  name: string;
+  l1: L1;
+  proficiency: ProficiencyLevel;
+  context: string;
+  goals: string;
+}
+
+/**
+ * Narrows a `profiles` row to a `CompleteProfile` once onboarding has set every field, or `null`
+ * while any are still missing — the signal used below to pick onboarding mode vs. coaching mode
+ * for a connection.
+ */
+function toCompleteProfile(profile: typeof profiles.$inferSelect): CompleteProfile | null {
+  if (!profile.name || !profile.l1 || !profile.proficiency || !profile.context || !profile.goals) {
+    return null;
+  }
+  return {
+    name: profile.name,
+    l1: profile.l1,
+    proficiency: profile.proficiency,
+    context: profile.context,
+    goals: profile.goals,
+  };
+}
+
 interface PersistedTurn {
   id: string;
   createdAt: Date;
   /** `hasClip` is always false here — it's only known once `maybeStoreClip` runs afterward. */
   errors: PersistedError[];
+  pronunciationErrors: PersistedPronunciationError[];
 }
 
-/** Persists a turn and its detected errors together in one transaction. */
+/** Converts the wire-shaped `PronunciationEditOp` (has `wordIndex`, not needed downstream) into
+ * the persistence/prompt-shaped `DetectedPronunciationError`. */
+function toDetectedPronunciationErrors(
+  editOps: PronunciationEditOp[],
+): DetectedPronunciationError[] {
+  return editOps.map(({ word, op, expectedPhoneme, spokenPhoneme }) => ({
+    word,
+    op,
+    expectedPhoneme,
+    spokenPhoneme,
+    source: "audio",
+  }));
+}
+
+type TurnAnalysis =
+  | { failed: true }
+  | {
+      failed: false;
+      errors: DetectedError[];
+      analysisUsage: TokenUsage;
+      analysisModel: string;
+      pronunciationErrors: DetectedPronunciationError[];
+    };
+
+/**
+ * Runs pass 1 (grammar-error analysis) and pronunciation scoring concurrently. A grammar-analysis
+ * failure aborts the turn (`failed: true`); a pronunciation-scoring failure degrades to an empty
+ * pronunciation-error list instead, since it's the newer, less-proven pass — deliberately
+ * asymmetric handling of the two `Promise.allSettled` branches.
+ */
+async function analyzeTurn(
+  transcript: string,
+  l1: L1,
+  audio: Buffer,
+  priorTranscripts: string[],
+  log: FastifyBaseLogger,
+): Promise<TurnAnalysis> {
+  const canonicalPhones = g2p(transcript);
+  const [analysisResult, pronunciationResult] = await Promise.allSettled([
+    getLLMProvider().analyzeErrors(transcript, l1),
+    getPronunciationProvider().scoreTurn(audio, canonicalPhones),
+  ]);
+
+  if (analysisResult.status === "rejected") {
+    log.error(analysisResult.reason, "Failed to analyze errors");
+    return { failed: true };
+  }
+
+  let pronunciationErrors: DetectedPronunciationError[] = [];
+  if (pronunciationResult.status === "fulfilled") {
+    pronunciationErrors = toDetectedPronunciationErrors(pronunciationResult.value);
+  } else {
+    log.error(pronunciationResult.reason, "Failed to score pronunciation");
+  }
+  pronunciationErrors = [
+    ...pronunciationErrors,
+    ...detectAsrSmoothedDeviations(transcript, priorTranscripts),
+  ];
+
+  const analysis = analysisResult.value;
+  return {
+    failed: false,
+    errors: analysis.errors,
+    analysisUsage: analysis.usage,
+    analysisModel: analysis.model,
+    pronunciationErrors,
+  };
+}
+
+/** Sends the turn's `turn_errors` and/or `turn_pronunciation_errors` messages, one per detected
+ * category, skipping either one the turn had nothing to report for. */
+function sendTurnErrorMessages(
+  send: (message: ServerToClientMessage) => void,
+  persistedTurn: PersistedTurn,
+  hasClip: boolean,
+): void {
+  if (persistedTurn.errors.length > 0) {
+    send({
+      type: "turn_errors",
+      turnId: persistedTurn.id,
+      createdAt: persistedTurn.createdAt.toISOString(),
+      errors: persistedTurn.errors.map((error) => ({ ...error, hasClip })),
+    });
+  }
+  if (persistedTurn.pronunciationErrors.length > 0) {
+    send({
+      type: "turn_pronunciation_errors",
+      turnId: persistedTurn.id,
+      createdAt: persistedTurn.createdAt.toISOString(),
+      errors: persistedTurn.pronunciationErrors,
+    });
+  }
+}
+
+/** Persists a turn and its detected grammar/pronunciation errors together in one transaction. */
 async function persistTurn(
   sessionId: string,
   transcript: string,
   replyText: string,
   errors: DetectedError[],
+  pronunciationErrors: DetectedPronunciationError[],
 ): Promise<PersistedTurn> {
   return db.transaction(async (tx) => {
     const [turn] = await tx
@@ -83,7 +223,27 @@ async function persistTurn(
         bookmarked: false,
       }));
     }
-    return { id: turn.id, createdAt: turn.createdAt, errors: persistedErrors };
+    let persistedPronunciationErrors: PersistedPronunciationError[] = [];
+    if (pronunciationErrors.length > 0) {
+      const inserted = await tx
+        .insert(turnPronunciationErrors)
+        .values(pronunciationErrors.map((error) => ({ turnId: turn.id, ...error })))
+        .returning();
+      persistedPronunciationErrors = inserted.map((row) => ({
+        id: row.id,
+        word: row.word,
+        op: row.op,
+        expectedPhoneme: row.expectedPhoneme,
+        spokenPhoneme: row.spokenPhoneme,
+        source: row.source,
+      }));
+    }
+    return {
+      id: turn.id,
+      createdAt: turn.createdAt,
+      errors: persistedErrors,
+      pronunciationErrors: persistedPronunciationErrors,
+    };
   });
 }
 
@@ -143,7 +303,7 @@ export function registerSessionRoutes(app: FastifyInstance): void {
       }
 
       const [profile] = await db.select().from(profiles).where(eq(profiles.clerkUserId, userId));
-      if (!profile?.l1 || !profile.consentGivenAt) {
+      if (!profile?.consentGivenAt) {
         reject("Recording consent required");
         return;
       }
@@ -151,8 +311,12 @@ export function registerSessionRoutes(app: FastifyInstance): void {
         reject("Daily session limit reached");
         return;
       }
-      const l1: L1 = profile.l1;
       const hasConsent = Boolean(profile.consentGivenAt);
+      const completeProfile = toCompleteProfile(profile);
+      let l1: L1 | undefined = completeProfile?.l1;
+      let replySystemPrompt: string | undefined = completeProfile
+        ? buildReplySystemPrompt(completeProfile)
+        : undefined;
 
       const [session] = await db.insert(sessions).values({ clerkUserId: userId }).returning();
       if (!session) throw new Error("Failed to insert session record");
@@ -187,6 +351,11 @@ export function registerSessionRoutes(app: FastifyInstance): void {
 
       const conversationHistory: ConversationMessage[] = [];
       let turnAudioChunks: Buffer[] = [];
+      /** Every distinct transcript Flux has emitted for the turn in progress, in order — lets a
+       * later `EndOfTurn` be compared against what Flux hypothesized before it settled (see
+       * docs/superpowers/specs/2026-09-05-flux-transcript-revision-detection-design.md). Reset at
+       * `StartOfTurn` and after `EndOfTurn` consumes it. */
+      let turnTranscriptHistory: string[] = [];
       // The client records with a single MediaRecorder for the whole session, so only the very
       // first chunk it ever emits carries the WebM/Opus container header (EBML + Segment +
       // Tracks) — every later chunk is a headerless fragment, only meaningful appended after that
@@ -224,6 +393,75 @@ export function registerSessionRoutes(app: FastifyInstance): void {
       let replyPlaying = false;
 
       /**
+       * The onboarding flow's current state, or `null` once onboarding is complete (or was never
+       * needed, because the profile was already complete at connection time). `EndOfTurn` routes
+       * to `handleOnboardingTurn` while this is non-null, and to `handleTurn` once it's `null`.
+       */
+      let onboardingFlowState: OnboardingState | null = null;
+      let initialOnboardingLine: string | null = null;
+      if (!completeProfile) {
+        const started = startOnboarding();
+        onboardingFlowState = started.state;
+        initialOnboardingLine = started.say;
+      }
+
+      /**
+       * Runs `fn` under a fresh `ActiveTurn` for its whole duration, so barge-in is tracked the
+       * same way for a coaching reply, the greeting, and every onboarding-flow line (question,
+       * confirmation, or transition) — including, for onboarding, the extraction call before any
+       * audio starts. A no-op if a turn is already active, same guard `handleTurn` uses.
+       */
+      async function withActiveTurn(fn: (aborted: () => boolean) => Promise<void>): Promise<void> {
+        if (activeTurn) return;
+        const myTurn: ActiveTurn = { interrupted: false };
+        activeTurn = myTurn;
+        try {
+          await fn(() => ended || myTurn.interrupted);
+        } finally {
+          if (activeTurn === myTurn) activeTurn = null;
+        }
+      }
+
+      /**
+       * Speaks a fixed line of text (not an LLM stream) through the same audio pipeline a normal
+       * reply uses — shared by `sendGreeting` and every onboarding-flow line. Callers wrap this in
+       * `withActiveTurn` themselves, mirroring how `streamReplyWithPipelinedTTS` takes `aborted`
+       * as a parameter rather than managing its own turn.
+       */
+      async function speakLine(
+        text: string,
+        aborted: () => boolean,
+        recordHistory = true,
+      ): Promise<void> {
+        if (containsDisallowedContent(text)) return;
+        send({ type: "reply_text_delta", text });
+        const { sentences, remainder } = splitSentences(text);
+        const finalSentence = remainder.trim();
+        const allSentences = finalSentence ? [...sentences, finalSentence] : sentences;
+        for (const sentence of allSentences) {
+          if (aborted()) return;
+          try {
+            const { audio, model } = await getTTSProvider().synthesize(sentence);
+            await recordUsage(sessionId, { ttsCharacters: sentence.length, ttsModel: model });
+            for await (const chunk of audio) {
+              if (aborted()) return;
+              socket.send(Buffer.from(chunk));
+            }
+          } catch (error) {
+            request.log.error(error, "Failed to synthesize spoken line audio");
+            break;
+          }
+        }
+        if (aborted()) return;
+        if (recordHistory) conversationHistory.push({ role: "assistant", content: text });
+        send({ type: "reply_text", text });
+        if (!aborted()) {
+          replyPlaying = true;
+          send({ type: "reply_audio_end" });
+        }
+      }
+
+      /**
        * Starts pass 2 (streamed) and the sentence-pipelined TTS synthesis running concurrently:
        * as each complete sentence is detected in the reply's token stream, it's handed to the TTS
        * queue so synthesis for sentence N overlaps with the model still generating sentence N+1,
@@ -242,6 +480,7 @@ export function registerSessionRoutes(app: FastifyInstance): void {
        */
       async function streamReplyWithPipelinedTTS(
         errors: DetectedError[],
+        pronunciationErrors: DetectedPronunciationError[],
         aborted: () => boolean,
       ): Promise<
         | { textFailed: true }
@@ -253,22 +492,44 @@ export function registerSessionRoutes(app: FastifyInstance): void {
             waitForAudio: () => Promise<{ audioFailed: boolean }>;
           }
       > {
+        if (replySystemPrompt === undefined) {
+          throw new Error(
+            "Unreachable: streamReplyWithPipelinedTTS requires onboarding to have completed",
+          );
+        }
+        const resolvedSystemPrompt = replySystemPrompt;
         // Pass a snapshot: conversationHistory keeps mutating (the assistant reply below, future
         // turns) after this call is made, and callers/tests may hold onto this array.
-        const replyStream = getLLMProvider().generateReply([...conversationHistory], errors);
-        const sentenceQueue = new AsyncQueue<string>();
+        const replyStream = getLLMProvider().generateReply(
+          [...conversationHistory],
+          errors,
+          pronunciationErrors,
+          resolvedSystemPrompt,
+        );
+        const sentenceQueue = new AsyncQueue<{ text: string; highQuality: boolean }>();
+        // Resolves «word» emphasis markers (correction-word-emphasis spec) — feeds the plain
+        // (marker-stripped) form to captions/persistence/history, and the speech form
+        // (marked word upper-cased) to sentence-splitting/TTS below. Upper-casing is a pure case
+        // transform, so `sentenceBuffer` (speech form) and `replyText` (plain form) stay
+        // character-length-identical throughout, even though only the speech side is actually
+        // sentence-split here.
+        const markerResolver = createMarkerResolver();
         let sentenceBuffer = "";
+        // True once the in-progress sentence has resolved a marker — reset after each sentence is
+        // queued. At most one marker per reply (per the system prompt), so there's no ambiguity
+        // about which in-progress sentence a resolved marker belongs to.
+        let sentenceHasEmphasis = false;
         let replyText = "";
         let audioFailed = false;
 
         async function consumeAudio(): Promise<void> {
           try {
-            for await (const sentence of sentenceQueue) {
+            for await (const { text, highQuality } of sentenceQueue) {
               if (aborted()) return;
-              const { audio, model } = await getTTSProvider().synthesize(sentence);
+              const { audio, model } = await getTTSProvider({ highQuality }).synthesize(text);
               // Characters are billed by the TTS vendor as soon as the call is made, regardless
               // of whether the resulting stream is fully consumed.
-              await recordUsage(sessionId, { ttsCharacters: sentence.length, ttsModel: model });
+              await recordUsage(sessionId, { ttsCharacters: text.length, ttsModel: model });
               for await (const chunk of audio) {
                 if (aborted()) return;
                 socket.send(Buffer.from(chunk));
@@ -293,25 +554,35 @@ export function registerSessionRoutes(app: FastifyInstance): void {
         // time its sentence boundary is detected — only the audio side is guarded here.
         let blocked = false;
         try {
-          for await (const delta of replyStream.textStream) {
+          deltaLoop: for await (const delta of replyStream.textStream) {
             if (aborted()) break;
-            replyText += delta;
-            send({ type: "reply_text_delta", text: delta });
-            const { sentences, remainder } = splitSentences(sentenceBuffer + delta);
-            sentenceBuffer = remainder;
-            for (const sentence of sentences) {
-              if (containsDisallowedContent(sentence)) {
-                blocked = true;
-                break;
+            // Segments (not one aggregated result per delta) so a sentence boundary and a marker
+            // landing in the same delta are handled in the order they actually occur — a
+            // sentence completed in an earlier segment must not be flagged by a marker resolved
+            // in a later one within the same delta.
+            for (const segment of markerResolver.feed(delta)) {
+              replyText += segment.plain;
+              if (segment.plain) send({ type: "reply_text_delta", text: segment.plain });
+              if (segment.emphasized) sentenceHasEmphasis = true;
+              const { sentences, remainder } = splitSentences(sentenceBuffer + segment.speechText);
+              sentenceBuffer = remainder;
+              for (const sentence of sentences) {
+                if (containsDisallowedContent(sentence)) {
+                  blocked = true;
+                  break deltaLoop;
+                }
+                sentenceQueue.push({ text: sentence, highQuality: sentenceHasEmphasis });
+                sentenceHasEmphasis = false;
               }
-              sentenceQueue.push(sentence);
             }
-            if (blocked) break;
           }
-          const finalSentence = sentenceBuffer.trim();
+          const flushed = markerResolver.flush();
+          replyText += flushed.plain;
+          if (flushed.plain) send({ type: "reply_text_delta", text: flushed.plain });
+          const finalSentence = (sentenceBuffer + flushed.speechText).trim();
           if (!blocked && finalSentence && !aborted()) {
             if (containsDisallowedContent(finalSentence)) blocked = true;
-            else sentenceQueue.push(finalSentence);
+            else sentenceQueue.push({ text: finalSentence, highQuality: sentenceHasEmphasis });
           }
         } catch (error) {
           request.log.error(error, "Failed to generate reply");
@@ -352,7 +623,11 @@ export function registerSessionRoutes(app: FastifyInstance): void {
       }
 
       /** Runs the LLM reply + TTS pipeline for one finished user turn. */
-      async function handleTurn(transcript: string, audio: Buffer): Promise<void> {
+      async function handleTurn(
+        transcript: string,
+        audio: Buffer,
+        priorTranscripts: string[],
+      ): Promise<void> {
         if (activeTurn) return;
         const myTurn: ActiveTurn = { interrupted: false };
         activeTurn = myTurn;
@@ -366,24 +641,31 @@ export function registerSessionRoutes(app: FastifyInstance): void {
         // own completion.
         let pendingAudio: (() => Promise<{ audioFailed: boolean }>) | undefined;
         try {
+          if (l1 === undefined) {
+            throw new Error("Unreachable: handleTurn requires onboarding to have completed");
+          }
+          const resolvedL1: L1 = l1;
           if (transcript.length > MAX_TRANSCRIPT_LENGTH) {
             if (!ended) send({ type: "error", message: "Transcript too long" });
             return;
           }
           conversationHistory.push({ role: "user", content: transcript });
 
-          let analysis: AnalysisResult;
-          try {
-            analysis = await getLLMProvider().analyzeErrors(transcript, l1);
-          } catch (error) {
-            request.log.error(error, "Failed to analyze errors");
+          const analysis = await analyzeTurn(
+            transcript,
+            resolvedL1,
+            audio,
+            priorTranscripts,
+            request.log,
+          );
+          if (analysis.failed) {
             if (!ended) send({ type: "error", message: "Could not analyze your speech" });
             return;
           }
-          const errors = analysis.errors;
+          const { errors, pronunciationErrors, analysisUsage, analysisModel } = analysis;
           if (aborted()) return;
 
-          const result = await streamReplyWithPipelinedTTS(errors, aborted);
+          const result = await streamReplyWithPipelinedTTS(errors, pronunciationErrors, aborted);
           if (result.textFailed) {
             sendPipelineFailure("Could not generate a reply");
             return;
@@ -393,9 +675,9 @@ export function registerSessionRoutes(app: FastifyInstance): void {
           // The vendor calls already ran and were billed regardless of what happens next (abort,
           // persistence failure), so token usage is recorded unconditionally here.
           await recordUsage(sessionId, {
-            analysisInputTokens: analysis.usage.inputTokens,
-            analysisOutputTokens: analysis.usage.outputTokens,
-            analysisModel: analysis.model,
+            analysisInputTokens: analysisUsage.inputTokens,
+            analysisOutputTokens: analysisUsage.outputTokens,
+            analysisModel,
             replyInputTokens: usage.inputTokens,
             replyOutputTokens: usage.outputTokens,
             replyModel,
@@ -405,7 +687,13 @@ export function registerSessionRoutes(app: FastifyInstance): void {
 
           let persistedTurn: PersistedTurn;
           try {
-            persistedTurn = await persistTurn(sessionId, transcript, replyText, errors);
+            persistedTurn = await persistTurn(
+              sessionId,
+              transcript,
+              replyText,
+              errors,
+              pronunciationErrors,
+            );
           } catch (error) {
             request.log.error(error, "Failed to persist turn");
             if (!ended) send({ type: "error", message: "Could not save this turn" });
@@ -421,14 +709,7 @@ export function registerSessionRoutes(app: FastifyInstance): void {
             request.log,
           );
           if (aborted()) return;
-          if (hasErrors) {
-            send({
-              type: "turn_errors",
-              turnId: persistedTurn.id,
-              createdAt: persistedTurn.createdAt.toISOString(),
-              errors: persistedTurn.errors.map((error) => ({ ...error, hasClip })),
-            });
-          }
+          sendTurnErrorMessages(send, persistedTurn, hasClip);
           send({ type: "reply_text", text: replyText });
 
           pendingAudio = undefined;
@@ -451,43 +732,113 @@ export function registerSessionRoutes(app: FastifyInstance): void {
        * Speaks Kalli's opening line before the learner's first turn, through the same
        * text/audio pipeline a normal reply uses (so barge-in, usage metering, etc. all behave
        * identically) — but it's not a `handleTurn` call: there's no transcript, no error
-       * analysis, and it's never persisted as a `turns` row, since it isn't really a turn.
+       * analysis, and it's never persisted as a `turns` row, since it isn't really a turn. Only
+       * called once the profile is already complete — an onboarding-mode connection speaks its
+       * first onboarding question instead (see `initialOnboardingLine` below).
        */
       async function sendGreeting(): Promise<void> {
-        if (activeTurn) return;
-        const myTurn: ActiveTurn = { interrupted: false };
-        activeTurn = myTurn;
-        const aborted = (): boolean => ended || myTurn.interrupted;
-        try {
-          const greeting = pickGreeting();
-          send({ type: "reply_text_delta", text: greeting });
-          const { sentences, remainder } = splitSentences(greeting);
-          const finalSentence = remainder.trim();
-          const allSentences = finalSentence ? [...sentences, finalSentence] : sentences;
-          for (const sentence of allSentences) {
-            if (aborted()) return;
-            try {
-              const { audio, model } = await getTTSProvider().synthesize(sentence);
-              await recordUsage(sessionId, { ttsCharacters: sentence.length, ttsModel: model });
-              for await (const chunk of audio) {
-                if (aborted()) return;
-                socket.send(Buffer.from(chunk));
-              }
-            } catch (error) {
-              request.log.error(error, "Failed to synthesize greeting audio");
-              break;
-            }
-          }
-          if (aborted()) return;
-          conversationHistory.push({ role: "assistant", content: greeting });
-          send({ type: "reply_text", text: greeting });
-          if (!aborted()) {
-            replyPlaying = true;
-            send({ type: "reply_audio_end" });
-          }
-        } finally {
-          if (activeTurn === myTurn) activeTurn = null;
+        await withActiveTurn((aborted) => speakLine(pickGreeting(completeProfile?.name), aborted));
+      }
+
+      /**
+       * Handles one user turn while `onboardingFlowState` is non-null: extracts the current
+       * field's answer (or a yes/no confirmation, depending on the flow's phase), advances the
+       * pure state machine in `onboarding/flow.ts`, and either speaks the next question/confirm
+       * line or — once every field is collected — persists the profile, switches the session to
+       * coaching mode, and speaks a short transition line. Like `sendGreeting`, none of this is
+       * persisted as a `turns` row.
+       */
+      async function handleOnboardingTurn(transcript: string): Promise<void> {
+        if (!onboardingFlowState) return;
+        // `userId`'s narrowing to `string` (from the preValidation check far above) doesn't carry
+        // into this function — it's a hoisted `function` declaration, not an arrow function
+        // defined after the narrowing, so the compiler can't assume it's only ever called
+        // afterward. `handleOnboardingTurn` is in fact only ever invoked once that guard has
+        // already run, so this is re-establishing a known-true fact, not handling a new case.
+        if (!userId) {
+          throw new Error("Unreachable: preValidation should have rejected this request");
         }
+        await withActiveTurn(async (aborted) => {
+          if (transcript.length > MAX_TRANSCRIPT_LENGTH) {
+            if (!ended) send({ type: "error", message: "Transcript too long" });
+            return;
+          }
+          const state = onboardingFlowState;
+          if (!state) return;
+
+          let result: OnboardingResult;
+          try {
+            if (state.phase === "asking") {
+              const extraction = await extractOnboardingAnswer(state.field, transcript, {
+                spelling: state.spelling,
+              });
+              if (aborted()) return;
+              await recordUsage(sessionId, {
+                analysisInputTokens: extraction.usage.inputTokens,
+                analysisOutputTokens: extraction.usage.outputTokens,
+                analysisModel: getAnalysisModelId(),
+              });
+              result = submitAnswer(state, extraction);
+            } else {
+              const confirmation = await extractOnboardingConfirmation(transcript);
+              if (aborted()) return;
+              await recordUsage(sessionId, {
+                analysisInputTokens: confirmation.usage.inputTokens,
+                analysisOutputTokens: confirmation.usage.outputTokens,
+                analysisModel: getAnalysisModelId(),
+              });
+              result = submitConfirmation(state, confirmation.confirmed);
+            }
+          } catch (error) {
+            request.log.error(error, "Failed to extract onboarding answer");
+            if (!ended) send({ type: "error", message: "Could not process your answer" });
+            return;
+          }
+
+          if (!result.done) {
+            onboardingFlowState = result.state;
+            await speakLine(result.say, aborted, false);
+            return;
+          }
+
+          const { name, l1: collectedL1, proficiency, context, goals } = result.profile;
+          const truncatedName = name.slice(0, MAX_PROFILE_FIELD_LENGTH);
+          const truncatedContext = context.slice(0, MAX_PROFILE_FIELD_LENGTH);
+          const truncatedGoals = goals.slice(0, MAX_PROFILE_FIELD_LENGTH);
+          try {
+            await db
+              .update(profiles)
+              .set({
+                name: truncatedName,
+                l1: collectedL1,
+                proficiency,
+                context: truncatedContext,
+                goals: truncatedGoals,
+              })
+              .where(eq(profiles.clerkUserId, userId));
+          } catch (error) {
+            request.log.error(error, "Failed to persist onboarding profile");
+            if (!ended) send({ type: "error", message: "Could not save your profile" });
+            return;
+          }
+          onboardingFlowState = null;
+          l1 = collectedL1;
+          replySystemPrompt = buildReplySystemPrompt({
+            name: truncatedName,
+            proficiency,
+            context: truncatedContext,
+            goals: truncatedGoals,
+          });
+          send({
+            type: "profile_updated",
+            name: truncatedName,
+            l1: collectedL1,
+            proficiency,
+            context: truncatedContext,
+            goals: truncatedGoals,
+          });
+          await speakLine(`Great, ${truncatedName} — let's get started!`, aborted);
+        });
       }
 
       try {
@@ -521,6 +872,7 @@ export function registerSessionRoutes(app: FastifyInstance): void {
         // latency, instead of clipping the first fraction-second of actual speech.
         if (data.event === "StartOfTurn") {
           turnAudioChunks = [...preRollChunks];
+          turnTranscriptHistory = [];
           if (activeTurn || replyPlaying) {
             if (activeTurn) {
               activeTurn.interrupted = true;
@@ -541,11 +893,21 @@ export function registerSessionRoutes(app: FastifyInstance): void {
               ? Buffer.concat(turnAudioChunks)
               : Buffer.concat([webmHeaderChunk, ...turnAudioChunks]);
           turnAudioChunks = [];
-          if (data.transcript) void handleTurn(data.transcript, turnAudio);
+          const priorTranscripts = turnTranscriptHistory;
+          turnTranscriptHistory = [];
+          if (data.transcript) {
+            if (onboardingFlowState) void handleOnboardingTurn(data.transcript);
+            else void handleTurn(data.transcript, turnAudio, priorTranscripts);
+          }
           return;
         }
 
-        if (data.transcript) send({ type: "transcript", text: data.transcript, isFinal: false });
+        if (data.transcript) {
+          send({ type: "transcript", text: data.transcript, isFinal: false });
+          if (turnTranscriptHistory.at(-1) !== data.transcript) {
+            turnTranscriptHistory.push(data.transcript);
+          }
+        }
       });
 
       deepgramConnection.on("error", handleTranscriptionError);
@@ -554,7 +916,12 @@ export function registerSessionRoutes(app: FastifyInstance): void {
         void endSession("error");
       });
 
-      void sendGreeting();
+      if (initialOnboardingLine !== null) {
+        const onboardingLine = initialOnboardingLine;
+        void withActiveTurn((aborted) => speakLine(onboardingLine, aborted, false));
+      } else {
+        void sendGreeting();
+      }
 
       handleSocketMessage = (message: Buffer, isBinary: boolean) => {
         if (isBinary) {

@@ -1,11 +1,26 @@
-import type { DetectedError, L1, ServerToClientMessage } from "@kalli/types";
+import type {
+  DetectedError,
+  DetectedPronunciationError,
+  L1,
+  ProficiencyLevel,
+  ServerToClientMessage,
+} from "@kalli/types";
 import { eq } from "drizzle-orm";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { db } from "../db/client.js";
-import { audioClips, profiles, sessions, turnErrors, turns, usageRecords } from "../db/schema.js";
+import {
+  audioClips,
+  profiles,
+  sessions,
+  turnErrors,
+  turnPronunciationErrors,
+  turns,
+  usageRecords,
+} from "../db/schema.js";
 import type { DeepgramConnection, DeepgramMessage, DeepgramTurnInfoMessage } from "../deepgram.js";
 import type { ConversationMessage } from "../llm.js";
+import type { PronunciationEditOp } from "../pronunciation.js";
 
 type InjectedWebSocket = Awaited<ReturnType<FastifyInstance["injectWS"]>>;
 
@@ -101,6 +116,62 @@ vi.mock("../deepgram.js", () => ({
   openDeepgramConnection: deepgramTestState.openDeepgramConnection,
 }));
 
+const onboardingExtractTestState = vi.hoisted(() => {
+  const DEFAULT_USAGE = { inputTokens: 1, outputTokens: 1 };
+  type AnswerImpl = (
+    field: string,
+    transcript: string,
+    options: { spelling?: boolean },
+  ) => Promise<{
+    value: string | null;
+    l1: string | null;
+    proficiency: string | null;
+    confident: boolean;
+    usage: { inputTokens: number; outputTokens: number };
+  }>;
+  type ConfirmationImpl = (
+    transcript: string,
+  ) => Promise<{ confirmed: boolean; usage: { inputTokens: number; outputTokens: number } }>;
+
+  let answerImpl: AnswerImpl = async () => ({
+    value: null,
+    l1: null,
+    proficiency: null,
+    confident: false,
+    usage: DEFAULT_USAGE,
+  });
+  let confirmationImpl: ConfirmationImpl = async () => ({ confirmed: true, usage: DEFAULT_USAGE });
+
+  return {
+    reset: (): void => {
+      answerImpl = async () => ({
+        value: null,
+        l1: null,
+        proficiency: null,
+        confident: false,
+        usage: DEFAULT_USAGE,
+      });
+      confirmationImpl = async () => ({ confirmed: true, usage: DEFAULT_USAGE });
+    },
+    setAnswerImpl: (impl: AnswerImpl): void => {
+      answerImpl = impl;
+    },
+    setConfirmationImpl: (impl: ConfirmationImpl): void => {
+      confirmationImpl = impl;
+    },
+    extractOnboardingAnswer: vi.fn(
+      (field: string, transcript: string, options: { spelling?: boolean } = {}) =>
+        answerImpl(field, transcript, options),
+    ),
+    extractOnboardingConfirmation: vi.fn((transcript: string) => confirmationImpl(transcript)),
+  };
+});
+
+vi.mock("../onboarding/extract.js", () => ({
+  extractOnboardingAnswer: onboardingExtractTestState.extractOnboardingAnswer,
+  extractOnboardingConfirmation: onboardingExtractTestState.extractOnboardingConfirmation,
+}));
+
 /** turn_index isn't read by the app today, so every fixture below uses a fixed placeholder. */
 function emitTurnInfo(event: DeepgramTurnInfoMessage["event"], transcript = ""): void {
   deepgramTestState.getLatest()?.emitMessage({
@@ -140,6 +211,7 @@ const llmTestState = vi.hoisted(() => {
   let replyUsage: TokenUsage = DEFAULT_REPLY_USAGE;
   const calls: ConversationMessage[][] = [];
   const replyErrorArgs: DetectedError[][] = [];
+  const replyPronunciationErrorArgs: DetectedPronunciationError[][] = [];
   const analyzeCalls: string[] = [];
   const analyzeL1Calls: L1[] = [];
 
@@ -151,6 +223,7 @@ const llmTestState = vi.hoisted(() => {
       replyUsage = DEFAULT_REPLY_USAGE;
       calls.length = 0;
       replyErrorArgs.length = 0;
+      replyPronunciationErrorArgs.length = 0;
       analyzeCalls.length = 0;
       analyzeL1Calls.length = 0;
     },
@@ -170,6 +243,7 @@ const llmTestState = vi.hoisted(() => {
     },
     getCalls: (): ConversationMessage[][] => calls,
     getReplyErrorArgs: (): DetectedError[][] => replyErrorArgs,
+    getReplyPronunciationErrorArgs: (): DetectedPronunciationError[][] => replyPronunciationErrorArgs,
     getAnalyzeCalls: (): string[] => analyzeCalls,
     getAnalyzeL1Calls: (): L1[] => analyzeL1Calls,
     analysisModel: MOCK_ANALYSIS_MODEL,
@@ -186,9 +260,14 @@ const llmTestState = vi.hoisted(() => {
       // delta once `replyImpl`'s promise settles, which every fixture's reply text (a single
       // short sentence, no embedded sentence breaks) still resolves to exactly one TTS call —
       // the same shape the pre-streaming tests asserted against.
-      generateReply: (history: ConversationMessage[], errors: DetectedError[]) => {
+      generateReply: (
+        history: ConversationMessage[],
+        errors: DetectedError[],
+        pronunciationErrors: DetectedPronunciationError[],
+      ) => {
         calls.push(history);
         replyErrorArgs.push(errors);
+        replyPronunciationErrorArgs.push(pronunciationErrors);
         const textPromise = replyImpl(history, errors);
         async function* textStream(): AsyncGenerator<string> {
           yield await textPromise;
@@ -203,6 +282,32 @@ const llmTestState = vi.hoisted(() => {
     })),
   };
 });
+
+const pronunciationTestState = vi.hoisted(() => {
+  let scoreImpl: (audio: Buffer) => Promise<PronunciationEditOp[]> = async () => [];
+  const scoreCalls: Buffer[] = [];
+
+  return {
+    reset: (): void => {
+      scoreImpl = async () => [];
+      scoreCalls.length = 0;
+    },
+    setScoreImpl: (fn: (audio: Buffer) => Promise<PronunciationEditOp[]>): void => {
+      scoreImpl = fn;
+    },
+    getScoreCalls: (): Buffer[] => scoreCalls,
+    getPronunciationProvider: vi.fn(() => ({
+      scoreTurn: async (audio: Buffer) => {
+        scoreCalls.push(audio);
+        return scoreImpl(audio);
+      },
+    })),
+  };
+});
+
+vi.mock("../pronunciation.js", () => ({
+  getPronunciationProvider: pronunciationTestState.getPronunciationProvider,
+}));
 
 const greetingTestState = vi.hoisted(() => {
   let greeting = "Hi, I'm Kalli!";
@@ -220,6 +325,8 @@ const greetingTestState = vi.hoisted(() => {
 vi.mock("../llm.js", () => ({
   getLLMProvider: llmTestState.getLLMProvider,
   pickGreeting: greetingTestState.pickGreeting,
+  buildReplySystemPrompt: vi.fn(() => "mock system prompt"),
+  getAnalysisModelId: vi.fn(() => llmTestState.analysisModel),
 }));
 
 const ttsTestState = vi.hoisted(() => {
@@ -235,25 +342,32 @@ const ttsTestState = vi.hoisted(() => {
     model: MOCK_TTS_MODEL,
   });
   const calls: string[] = [];
+  const providerCalls: { text: string; highQuality: boolean }[] = [];
 
   return {
     model: MOCK_TTS_MODEL,
     reset: (): void => {
       synthesizeImpl = async () => ({ audio: defaultChunks(), model: MOCK_TTS_MODEL });
       calls.length = 0;
+      providerCalls.length = 0;
     },
     setSynthesizeImpl: (fn: (text: string) => Promise<SynthesizeResult>): void => {
       synthesizeImpl = fn;
     },
     getCalls: (): string[] => calls,
+    /** Text paired with the `highQuality` flag `getTTSProvider` was called with, for tests
+     * asserting emphasis routing (correction-word-emphasis spec). */
+    getProviderCalls: (): { text: string; highQuality: boolean }[] => providerCalls,
     /** Clears recorded calls without touching `synthesizeImpl` — for tests that only want to
      * ignore the greeting's synthesize call, made before the turn under test even starts. */
     clearCalls: (): void => {
       calls.length = 0;
+      providerCalls.length = 0;
     },
-    getTTSProvider: vi.fn(() => ({
+    getTTSProvider: vi.fn((options: { highQuality?: boolean } = {}) => ({
       synthesize: async (text: string) => {
         calls.push(text);
+        providerCalls.push({ text, highQuality: options.highQuality ?? false });
         return synthesizeImpl(text);
       },
     })),
@@ -285,11 +399,25 @@ vi.mock("../storage.js", () => ({ getStorageProvider: storageTestState.getStorag
 
 // vitest hoists imports above vi.mock calls, so app.js must be imported after the mocks above are set up.
 const { buildApp } = await import("../app.js");
+const { buildReplySystemPrompt } = await import("../llm.js");
 
 async function giveConsent(l1: L1 = "spanish"): Promise<void> {
-  await db
-    .insert(profiles)
-    .values({ clerkUserId: "test-user-session-456", l1, consentGivenAt: new Date() });
+  await db.insert(profiles).values({
+    clerkUserId: "test-user-session-456",
+    name: "Test User",
+    l1,
+    proficiency: "intermediate",
+    context: "everyday conversation",
+    goals: "general fluency",
+    consentGivenAt: new Date(),
+  });
+}
+
+async function giveConsentOnly(): Promise<void> {
+  await db.insert(profiles).values({
+    clerkUserId: "test-user-session-456",
+    consentGivenAt: new Date(),
+  });
 }
 
 /**
@@ -347,13 +475,13 @@ function mixedQueue(ws: InjectedWebSocket): { next: () => Promise<QueuedFrame> }
 }
 
 /**
- * Drains the greeting turn's frames, sent automatically right after `session_started` for every
- * consented session. Every test below that gets past onboarding/session-cap rejection needs this
- * before asserting on anything else the server sends, since the greeting always runs first. Loops
- * to `reply_audio_end` rather than assuming a fixed frame count — a synthesis failure sends the
- * text frames but no audio chunks, which a hardcoded count would misalign on.
+ * Drains one spoken line's frames — the greeting for a coaching session, or the current question
+ * for an onboarding session — sent automatically right after `session_started`. Every test below
+ * that gets past onboarding/session-cap rejection needs this before asserting on anything else the
+ * server sends. Loops to `reply_audio_end` rather than assuming a fixed frame count — a synthesis
+ * failure sends the text frames but no audio chunks, which a hardcoded count would misalign on.
  */
-async function drainGreeting(queue: { next: () => Promise<QueuedFrame> }): Promise<void> {
+async function drainSpokenLine(queue: { next: () => Promise<QueuedFrame> }): Promise<void> {
   for (;;) {
     const frame = await queue.next();
     if (frame.kind === "json" && frame.message.type === "reply_audio_end") return;
@@ -376,7 +504,7 @@ async function connectAndGreet(
     kind: "json";
     message: { type: "session_started"; sessionId: string };
   };
-  await drainGreeting(queue);
+  await drainSpokenLine(queue);
   return { ws, queue, sessionId: started.message.sessionId };
 }
 
@@ -385,10 +513,13 @@ const AUTH_HEADERS = { headers: { authorization: "Bearer test-user-session-456" 
 afterEach(async () => {
   deepgramTestState.setShouldFail(false);
   llmTestState.reset();
+  pronunciationTestState.reset();
   greetingTestState.reset();
   ttsTestState.reset();
   storageTestState.reset();
+  onboardingExtractTestState.reset();
   await db.delete(turnErrors);
+  await db.delete(turnPronunciationErrors);
   await db.delete(turns);
   await db.delete(usageRecords);
   await db.delete(audioClips);
@@ -635,6 +766,7 @@ describe("session greeting", () => {
     expect(await queue.next()).toEqual({ kind: "json", message: { type: "reply_audio_end" } });
 
     expect(ttsTestState.getCalls()).toEqual(["Hi, I'm Kalli!"]);
+    expect(greetingTestState.pickGreeting).toHaveBeenCalledWith("Test User");
 
     ws.terminate();
     await app.close();
@@ -723,7 +855,7 @@ describe("turn-based reply loop", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
     ttsTestState.clearCalls();
 
     emitEndOfTurn("hello Kalli");
@@ -765,7 +897,7 @@ describe("turn-based reply loop", () => {
       message: { type: "session_started"; sessionId: string };
     };
     const sessionId = started.message.sessionId;
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     emitEndOfTurn("hello Kalli");
     await queue.next(); // transcript
@@ -802,7 +934,7 @@ describe("turn-based reply loop", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     emitEndOfTurn("");
 
@@ -829,7 +961,7 @@ describe("turn-based reply loop", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     emitEndOfTurn("first turn");
     await drainOneTurn(queue);
@@ -865,7 +997,7 @@ describe("turn-based reply loop", () => {
       message: { type: "session_started"; sessionId: string };
     };
     const sessionId = started.message.sessionId;
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     emitEndOfTurn("hello Kalli");
     await queue.next(); // transcript
@@ -900,7 +1032,7 @@ describe("turn-based reply loop", () => {
       message: { type: "session_started"; sessionId: string };
     };
     const sessionId = started.message.sessionId;
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     emitEndOfTurn("hello Kalli");
     await queue.next(); // transcript
@@ -946,7 +1078,7 @@ describe("transcript length limit", () => {
       message: { type: "session_started"; sessionId: string };
     };
     const sessionId = started.message.sessionId;
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     emitEndOfTurn("a".repeat(4001));
     await queue.next(); // transcript
@@ -975,7 +1107,7 @@ describe("transcript length limit", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     emitEndOfTurn("a".repeat(4000));
     await queue.next(); // transcript
@@ -1015,7 +1147,7 @@ describe("reply output guard", () => {
       message: { type: "session_started"; sessionId: string };
     };
     const sessionId = started.message.sessionId;
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
     ttsTestState.clearCalls();
 
     emitEndOfTurn("hello Kalli");
@@ -1054,7 +1186,7 @@ describe("two-pass correction pipeline", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     emitEndOfTurn("she go to school");
     await queue.next(); // transcript
@@ -1087,7 +1219,7 @@ describe("two-pass correction pipeline", () => {
       message: { type: "session_started"; sessionId: string };
     };
     const sessionId = started.message.sessionId;
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     emitEndOfTurn("she go to school");
     await queue.next(); // transcript
@@ -1122,7 +1254,7 @@ describe("two-pass correction pipeline", () => {
       message: { type: "session_started"; sessionId: string };
     };
     const sessionId = started.message.sessionId;
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     emitEndOfTurn("hello Kalli");
     await queue.next(); // transcript
@@ -1161,7 +1293,7 @@ describe("two-pass correction pipeline", () => {
       message: { type: "session_started"; sessionId: string };
     };
     const sessionId = started.message.sessionId;
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     emitEndOfTurn("hello Kalli");
     await queue.next(); // transcript
@@ -1175,6 +1307,476 @@ describe("two-pass correction pipeline", () => {
     const [row] = await db.select().from(sessions).where(eq(sessions.id, sessionId));
     expect(row?.endedAt).toBeNull();
     expect(await db.select().from(turns).where(eq(turns.sessionId, sessionId))).toHaveLength(0);
+
+    ws.terminate();
+    await app.close();
+  });
+});
+
+describe("pronunciation correction pipeline", () => {
+  it("sends the turn's audio to scoreTurn and its output into generateReply", async () => {
+    await giveConsent();
+    pronunciationTestState.setScoreImpl(async () => [
+      { word: "like", wordIndex: 0, op: "sub", expectedPhoneme: "L", spokenPhoneme: "R" },
+    ]);
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    await queue.next(); // session_started
+    await drainSpokenLine(queue);
+
+    ws.send(Buffer.from([1, 2, 3]));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    emitEndOfTurn("he rike it");
+    await queue.next(); // transcript
+    await queue.next(); // end_of_turn
+    await queue.next(); // reply_text_delta
+    await queue.next(); // audio chunk
+    await queue.next(); // audio chunk
+    await queue.next(); // turn_pronunciation_errors (no grammar errors, so no turn_errors frame)
+    await queue.next(); // reply_text
+    await queue.next(); // reply_audio_end
+
+    expect(pronunciationTestState.getScoreCalls()).toEqual([Buffer.from([1, 2, 3])]);
+    expect(llmTestState.getReplyPronunciationErrorArgs()).toEqual([
+      [{ word: "like", op: "sub", expectedPhoneme: "L", spokenPhoneme: "R", source: "audio" }],
+    ]);
+
+    ws.terminate();
+    await app.close();
+  });
+
+  it("persists pronunciation-error rows linked to the right turn and sends them to the client", async () => {
+    await giveConsent();
+    pronunciationTestState.setScoreImpl(async () => [
+      { word: "like", wordIndex: 0, op: "sub", expectedPhoneme: "L", spokenPhoneme: "R" },
+    ]);
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    const started = (await queue.next()) as {
+      kind: "json";
+      message: { type: "session_started"; sessionId: string };
+    };
+    const sessionId = started.message.sessionId;
+    await drainSpokenLine(queue);
+
+    ws.send(Buffer.from([1, 2, 3]));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    emitEndOfTurn("he rike it");
+    await queue.next(); // transcript
+    await queue.next(); // end_of_turn
+    await queue.next(); // reply_text_delta
+    await queue.next(); // audio chunk
+    await queue.next(); // audio chunk
+
+    const pronunciationFrame = await queue.next();
+    expect(pronunciationFrame).toEqual({
+      kind: "json",
+      message: {
+        type: "turn_pronunciation_errors",
+        turnId: expect.any(String),
+        createdAt: expect.any(String),
+        errors: [
+          {
+            id: expect.any(String),
+            word: "like",
+            op: "sub",
+            expectedPhoneme: "L",
+            spokenPhoneme: "R",
+            source: "audio",
+          },
+        ],
+      },
+    });
+
+    const [turn] = await db.select().from(turns).where(eq(turns.sessionId, sessionId));
+    expect(turn).toBeDefined();
+    const rows = await db
+      .select()
+      .from(turnPronunciationErrors)
+      .where(eq(turnPronunciationErrors.turnId, turn!.id));
+    expect(rows).toHaveLength(1);
+
+    ws.terminate();
+    await app.close();
+  });
+
+  it("passes an empty array to generateReply and sends no pronunciation message when nothing is detected", async () => {
+    await giveConsent();
+    pronunciationTestState.setScoreImpl(async () => []);
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    await queue.next(); // session_started
+    await drainSpokenLine(queue);
+
+    ws.send(Buffer.from([1, 2, 3]));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    emitEndOfTurn("he likes it");
+    await queue.next(); // transcript
+    await queue.next(); // end_of_turn
+    await queue.next(); // reply_text_delta
+    await queue.next(); // audio chunk
+    await queue.next(); // audio chunk
+
+    // Straight to reply_text — no turn_pronunciation_errors frame in between.
+    expect(await queue.next()).toEqual({
+      kind: "json",
+      message: { type: "reply_text", text: "Nice job!" },
+    });
+    expect(llmTestState.getReplyPronunciationErrorArgs()).toEqual([[]]);
+
+    ws.terminate();
+    await app.close();
+  });
+
+  it("keeps the turn alive (grammar correction and reply still happen) when scoreTurn fails", async () => {
+    await giveConsent();
+    pronunciationTestState.setScoreImpl(async () => {
+      throw new Error("pronunciation service unavailable");
+    });
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    await queue.next(); // session_started
+    await drainSpokenLine(queue);
+
+    ws.send(Buffer.from([1, 2, 3]));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    emitEndOfTurn("he likes it");
+    await queue.next(); // transcript
+    await queue.next(); // end_of_turn
+    await queue.next(); // reply_text_delta
+    await queue.next(); // audio chunk
+    await queue.next(); // audio chunk
+    await queue.next(); // reply_text — no pronunciation frame, and no error frame either
+    await queue.next(); // reply_audio_end
+
+    // The reply pipeline still ran, with an empty pronunciation-error list, unlike an
+    // analyzeErrors failure (which aborts the turn entirely).
+    expect(llmTestState.getCalls()).toHaveLength(1);
+    expect(llmTestState.getReplyPronunciationErrorArgs()).toEqual([[]]);
+
+    ws.terminate();
+    await app.close();
+  });
+
+  it("flags a mid-turn transcript revision as a pronunciation error", async () => {
+    await giveConsent();
+    pronunciationTestState.setScoreImpl(async () => []);
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    await queue.next(); // session_started
+    await drainSpokenLine(queue);
+
+    ws.send(Buffer.from([1, 2, 3]));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    emitStartOfTurn("I had a berry good day");
+    // The greeting's speakLine already set replyPlaying (it only clears on a client
+    // reply_playback_ended message, which this test never sends), so StartOfTurn's barge-in
+    // check fires here even though no turn is actively running.
+    await queue.next(); // reply_interrupted (barge_in)
+    await queue.next(); // transcript (isFinal: false, from StartOfTurn)
+    emitEndOfTurn("I had a very good day");
+    await queue.next(); // transcript (isFinal: true)
+    await queue.next(); // end_of_turn
+    await queue.next(); // reply_text_delta
+    await queue.next(); // audio chunk
+    await queue.next(); // audio chunk
+
+    const pronunciationFrame = await queue.next();
+    expect(pronunciationFrame).toEqual({
+      kind: "json",
+      message: {
+        type: "turn_pronunciation_errors",
+        turnId: expect.any(String),
+        createdAt: expect.any(String),
+        errors: [
+          {
+            id: expect.any(String),
+            word: "very",
+            op: "sub",
+            expectedPhoneme: "V",
+            spokenPhoneme: "B",
+            source: "transcript_revision",
+          },
+        ],
+      },
+    });
+    await queue.next(); // reply_text
+    await queue.next(); // reply_audio_end
+
+    ws.terminate();
+    await app.close();
+  });
+
+  it("merges a non-empty HuPER result with a detected transcript revision in the same turn", async () => {
+    await giveConsent();
+    pronunciationTestState.setScoreImpl(async () => [
+      { word: "like", wordIndex: 0, op: "sub", expectedPhoneme: "L", spokenPhoneme: "R" },
+    ]);
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    const started = (await queue.next()) as {
+      kind: "json";
+      message: { type: "session_started"; sessionId: string };
+    };
+    const sessionId = started.message.sessionId;
+    await drainSpokenLine(queue);
+
+    ws.send(Buffer.from([1, 2, 3]));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    emitStartOfTurn("I had a berry good day");
+    // The greeting's speakLine already set replyPlaying (it only clears on a client
+    // reply_playback_ended message, which this test never sends), so StartOfTurn's barge-in
+    // check fires here even though no turn is actively running.
+    await queue.next(); // reply_interrupted (barge_in)
+    await queue.next(); // transcript (isFinal: false, from StartOfTurn)
+    emitEndOfTurn("I had a very good day");
+
+    // Collect JSON frames up to reply_audio_end, ignoring interleaved binary audio chunks —
+    // their exact position relative to turn_pronunciation_errors/reply_text is a timing race
+    // between the concurrent TTS task and the persist-then-send code path, not a guarantee this
+    // test should assert on. The JSON-only ordering is what's guaranteed.
+    const jsonMessages: ServerToClientMessage[] = [];
+    for (;;) {
+      const frame = await queue.next();
+      if (frame.kind !== "json") continue;
+      jsonMessages.push(frame.message);
+      if (frame.message.type === "reply_audio_end") break;
+    }
+    expect(jsonMessages.map((m) => m.type)).toEqual([
+      "transcript",
+      "end_of_turn",
+      "reply_text_delta",
+      "turn_pronunciation_errors",
+      "reply_text",
+      "reply_audio_end",
+    ]);
+
+    const pronunciationMessage = jsonMessages.find((m) => m.type === "turn_pronunciation_errors");
+    expect(pronunciationMessage).toEqual({
+      type: "turn_pronunciation_errors",
+      turnId: expect.any(String),
+      createdAt: expect.any(String),
+      errors: [
+        {
+          id: expect.any(String),
+          word: "like",
+          op: "sub",
+          expectedPhoneme: "L",
+          spokenPhoneme: "R",
+          source: "audio",
+        },
+        {
+          id: expect.any(String),
+          word: "very",
+          op: "sub",
+          expectedPhoneme: "V",
+          spokenPhoneme: "B",
+          source: "transcript_revision",
+        },
+      ],
+    });
+
+    // The HuPER result comes first, then the revision-detected deviation — the order the merge
+    // code in analyzeTurn produces them in, and the order generateReply receives them in too.
+    expect(llmTestState.getReplyPronunciationErrorArgs()).toEqual([
+      [
+        { word: "like", op: "sub", expectedPhoneme: "L", spokenPhoneme: "R", source: "audio" },
+        {
+          word: "very",
+          op: "sub",
+          expectedPhoneme: "V",
+          spokenPhoneme: "B",
+          source: "transcript_revision",
+        },
+      ],
+    ]);
+
+    // Confirm both rows round-trip through persistence with the right source on each — this is
+    // what would catch a persistTurn `.returning()` multi-row misalignment, where row N's fields
+    // get attributed to row M.
+    const [turn] = await db.select().from(turns).where(eq(turns.sessionId, sessionId));
+    expect(turn).toBeDefined();
+    const rows = await db
+      .select()
+      .from(turnPronunciationErrors)
+      .where(eq(turnPronunciationErrors.turnId, turn!.id));
+    expect(rows).toHaveLength(2);
+    expect(rows.map((row) => ({ word: row.word, source: row.source }))).toEqual([
+      { word: "like", source: "audio" },
+      { word: "very", source: "transcript_revision" },
+    ]);
+
+    ws.terminate();
+    await app.close();
+  });
+
+  it("does not leak a completed turn's transcript history into the next turn", async () => {
+    await giveConsent();
+    pronunciationTestState.setScoreImpl(async () => []);
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    await queue.next(); // session_started
+    await drainSpokenLine(queue);
+
+    ws.send(Buffer.from([1, 2, 3]));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    emitStartOfTurn("I had a berry good day");
+    // The greeting's speakLine already set replyPlaying (it only clears on a client
+    // reply_playback_ended message, which this test never sends), so StartOfTurn's barge-in
+    // check fires here even though no turn is actively running.
+    await queue.next(); // reply_interrupted (barge_in)
+    await queue.next(); // transcript
+    emitEndOfTurn("I had a very good day");
+    await queue.next(); // transcript
+    await queue.next(); // end_of_turn
+    await queue.next(); // reply_text_delta
+    await queue.next(); // audio chunk
+    await queue.next(); // audio chunk
+    await queue.next(); // turn_pronunciation_errors
+    await queue.next(); // reply_text
+    await queue.next(); // reply_audio_end
+
+    emitEndOfTurn("I had a very good day");
+    await queue.next(); // transcript
+    await queue.next(); // end_of_turn
+    await queue.next(); // reply_text_delta
+    await queue.next(); // audio chunk
+    await queue.next(); // audio chunk
+    await queue.next(); // reply_text — no turn_pronunciation_errors frame this time
+    await queue.next(); // reply_audio_end
+
+    expect(llmTestState.getReplyPronunciationErrorArgs()).toEqual([
+      [
+        {
+          word: "very",
+          op: "sub",
+          expectedPhoneme: "V",
+          spokenPhoneme: "B",
+          source: "transcript_revision",
+        },
+      ],
+      [],
+    ]);
+
+    ws.terminate();
+    await app.close();
+  });
+});
+
+describe("word emphasis", () => {
+  /** Drains frames until a JSON message matching `predicate` arrives (inclusive), collecting
+   * every JSON message seen along the way and ignoring binary audio frames — this section cares
+   * about the sequence/content of `reply_text_delta` messages, not their exact interleaving with
+   * audio chunks from a concurrently-running consumeAudio task. */
+  async function collectJsonUntil(
+    queue: { next: () => Promise<QueuedFrame> },
+    predicate: (message: ServerToClientMessage) => boolean,
+  ): Promise<ServerToClientMessage[]> {
+    const messages: ServerToClientMessage[] = [];
+    for (;;) {
+      const frame = await queue.next();
+      if (frame.kind !== "json") continue;
+      messages.push(frame.message);
+      if (predicate(frame.message)) return messages;
+    }
+  }
+
+  it("routes only the sentence with an emphasis marker to the high-quality TTS tier", async () => {
+    await giveConsent();
+    // The whole reply arrives as a single delta (this fixture's shape) with a sentence boundary
+    // before the marker — the case that requires per-segment (not per-delta) flag tracking, since
+    // the earlier sentence must NOT be flagged just because the same delta later contains a
+    // marker.
+    llmTestState.setReplyImpl(async () => "Nice try! You'd say I went to «the» store.");
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    await queue.next(); // session_started
+    await drainSpokenLine(queue);
+    ttsTestState.clearCalls();
+
+    emitEndOfTurn("hello Kalli");
+    await queue.next(); // transcript
+    await queue.next(); // end_of_turn
+
+    const messages = await collectJsonUntil(queue, (m) => m.type === "reply_text");
+
+    // Marker stripped, original casing — the client never sees the «» sentinel, across however
+    // many reply_text_delta segments the marker split the stream into.
+    const deltas = messages.filter((m) => m.type === "reply_text_delta").map((m) => m.text);
+    expect(deltas.join("")).toBe("Nice try! You'd say I went to the store.");
+    expect(messages.at(-1)).toEqual({
+      type: "reply_text",
+      text: "Nice try! You'd say I went to the store.",
+    });
+
+    expect(ttsTestState.getProviderCalls()).toEqual([
+      { text: "Nice try!", highQuality: false },
+      { text: "You'd say I went to THE store.", highQuality: true },
+    ]);
+
+    ws.terminate();
+    await app.close();
+  });
+
+  it("does not route to the high-quality tier when a reply has no emphasis marker", async () => {
+    await giveConsent();
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    await queue.next(); // session_started
+    await drainSpokenLine(queue);
+    ttsTestState.clearCalls();
+
+    emitEndOfTurn("hello Kalli");
+    await queue.next(); // transcript
+    await queue.next(); // end_of_turn
+    await collectJsonUntil(queue, (m) => m.type === "reply_audio_end");
+
+    expect(ttsTestState.getProviderCalls()).toEqual([{ text: "Nice job!", highQuality: false }]);
 
     ws.terminate();
     await app.close();
@@ -1200,7 +1802,7 @@ describe("correction text panel", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     emitEndOfTurn("she go to school");
     await queue.next(); // transcript
@@ -1239,7 +1841,7 @@ describe("correction text panel", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     emitEndOfTurn("hello Kalli");
     await queue.next(); // transcript
@@ -1275,7 +1877,7 @@ describe("L1-driven interference hints", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     emitEndOfTurn("she go to school");
     await drainOneTurn(queue);
@@ -1296,7 +1898,7 @@ describe("L1-driven interference hints", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     emitEndOfTurn("she go to school");
     await drainOneTurn(queue);
@@ -1391,7 +1993,7 @@ describe("usage metering", () => {
       message: { type: "session_started"; sessionId: string };
     };
     const sessionId = started.message.sessionId;
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     emitEndOfTurn("hello Kalli");
     await queue.next(); // transcript
@@ -1436,7 +2038,7 @@ describe("usage metering", () => {
       message: { type: "session_started"; sessionId: string };
     };
     const sessionId = started.message.sessionId;
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     for (let i = 0; i < 2; i++) {
       emitEndOfTurn("hello Kalli");
@@ -1500,7 +2102,7 @@ describe("audio clip capture + storage", () => {
       message: { type: "session_started"; sessionId: string };
     };
     const sessionId = started.message.sessionId;
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     ws.send(Buffer.from([1, 2, 3]));
     ws.send(Buffer.from([4, 5]));
@@ -1539,7 +2141,7 @@ describe("audio clip capture + storage", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     ws.send(Buffer.from([1, 2, 3]));
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -1570,7 +2172,7 @@ describe("audio clip capture + storage", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     // Each turn has a detected error (sampleError), so an extra turn_errors frame is sent too:
     // transcript, end_of_turn, turn_errors, reply_text_delta, 2 audio chunks, reply_text, audio_end.
@@ -1607,7 +2209,7 @@ describe("audio clip capture + storage", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     // Chunk 1 is the session's first-ever chunk (the WebM header). Chunks 2-15 are silence/noise
     // buffered before Flux judges the user actually started speaking — more than the pre-roll
@@ -1625,9 +2227,7 @@ describe("audio clip capture + storage", () => {
 
     const uploads = storageTestState.getUploads();
     expect(uploads).toHaveLength(1);
-    expect(uploads[0]?.data).toEqual(
-      Buffer.from([1, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]),
-    );
+    expect(uploads[0]?.data).toEqual(Buffer.from([1, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]));
 
     ws.terminate();
     await app.close();
@@ -1645,7 +2245,7 @@ describe("barge-in support", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
     // The greeting counts as "playing" until the client reports it finished, same as any other
     // reply — report that here so the assertion below reflects a genuine no-reply-in-progress
     // state rather than incidentally exercising the greeting's own interruptible window.
@@ -1684,7 +2284,7 @@ describe("barge-in support", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
     // Installed only after the greeting's own synthesize call, which would otherwise consume
     // this pausable generator and hang on `continueSignal` before the turn under test even runs.
     ttsTestState.setSynthesizeImpl(async () => ({
@@ -1739,7 +2339,7 @@ describe("barge-in support", () => {
       message: { type: "session_started"; sessionId: string };
     };
     const sessionId = started.message.sessionId;
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
     // Installed only after the greeting's own synthesize call, which would otherwise consume
     // this pausable generator and hang on `continueSignal` before the turn under test even runs.
     ttsTestState.setSynthesizeImpl(async () => ({
@@ -1785,7 +2385,7 @@ describe("barge-in support", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     emitEndOfTurn("first turn");
     await queue.next(); // transcript
@@ -1843,7 +2443,7 @@ describe("barge-in support", () => {
       message: { type: "session_started"; sessionId: string };
     };
     const sessionId = started.message.sessionId;
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     emitEndOfTurn("first turn");
     await queue.next(); // transcript
@@ -1875,7 +2475,7 @@ describe("barge-in support", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     emitEndOfTurn("hello Kalli");
     await queue.next(); // transcript
@@ -1907,7 +2507,7 @@ describe("barge-in support", () => {
     });
     const queue = mixedQueue(ws);
     await queue.next(); // session_started
-    await drainGreeting(queue);
+    await drainSpokenLine(queue);
 
     emitEndOfTurn("hello Kalli");
     await queue.next(); // transcript
@@ -1934,6 +2534,170 @@ describe("barge-in support", () => {
     await queue.next();
     await queue.next();
     await queue.next();
+
+    ws.terminate();
+    await app.close();
+  });
+});
+
+describe("onboarding mode", () => {
+  it("speaks the name question instead of the generic greeting when the profile is incomplete", async () => {
+    await giveConsentOnly();
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", AUTH_HEADERS);
+    const queue = mixedQueue(ws);
+    await queue.next(); // session_started
+    const textFrame = (await queue.next()) as { kind: "json"; message: ServerToClientMessage };
+    if (textFrame.message.type !== "reply_text_delta") throw new Error("expected a spoken line");
+    expect(textFrame.message.text).toContain("call you");
+    await drainSpokenLine(queue);
+    ws.terminate();
+    await app.close();
+  });
+
+  it("walks through every field, persists the profile, and switches to coaching mode", async () => {
+    await giveConsentOnly();
+    const usage = { inputTokens: 1, outputTokens: 1 };
+    onboardingExtractTestState.setAnswerImpl(async (field) => {
+      if (field === "l1")
+        return { value: "Spanish", l1: "spanish", proficiency: null, confident: true, usage };
+      if (field === "proficiency") {
+        return {
+          value: "intermediate",
+          l1: null,
+          proficiency: "intermediate",
+          confident: true,
+          usage,
+        };
+      }
+      const value =
+        field === "name"
+          ? "Maria"
+          : field === "context"
+            ? "work meetings"
+            : "sounding more natural";
+      return { value, l1: null, proficiency: null, confident: true, usage };
+    });
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", AUTH_HEADERS);
+    const queue = mixedQueue(ws);
+    await queue.next(); // session_started
+    await drainSpokenLine(queue); // "what should I call you?"
+
+    const fields: Array<"name" | "l1" | "proficiency" | "context" | "goals"> = [
+      "name",
+      "l1",
+      "proficiency",
+      "context",
+      "goals",
+    ];
+    for (const field of fields) {
+      emitStartOfTurn();
+      emitEndOfTurn(`answer for ${field}`);
+      await drainSpokenLine(queue); // confirmation read-back
+      emitStartOfTurn();
+      emitEndOfTurn("yes");
+      if (field !== "goals") {
+        await drainSpokenLine(queue); // next question
+      } else {
+        await drainSpokenLine(queue); // profile_updated fires before the transition line
+      }
+    }
+
+    const [row] = await db
+      .select()
+      .from(profiles)
+      .where(eq(profiles.clerkUserId, "test-user-session-456"));
+    expect(row?.name).toBe("Maria");
+    expect(row?.l1).toBe("spanish");
+    expect(row?.proficiency).toBe("intermediate" satisfies ProficiencyLevel);
+    expect(row?.context).toBe("work meetings");
+    expect(row?.goals).toBe("sounding more natural");
+
+    // A subsequent turn now goes through the normal coaching pipeline, not onboarding extraction.
+    const callsBefore = llmTestState.getCalls().length;
+    emitStartOfTurn();
+    emitEndOfTurn("hello again");
+    await drainSpokenLine(queue);
+    expect(llmTestState.getCalls().length).toBe(callsBefore + 1);
+
+    expect(buildReplySystemPrompt).toHaveBeenCalledWith({
+      name: "Maria",
+      proficiency: "intermediate",
+      context: "work meetings",
+      goals: "sounding more natural",
+    });
+
+    ws.terminate();
+    await app.close();
+  });
+
+  it("sends profile_updated once onboarding completes", async () => {
+    await giveConsentOnly();
+    const usage = { inputTokens: 1, outputTokens: 1 };
+    onboardingExtractTestState.setAnswerImpl(async (field) => {
+      if (field === "l1")
+        return { value: "Spanish", l1: "spanish", proficiency: null, confident: true, usage };
+      if (field === "proficiency") {
+        return {
+          value: "intermediate",
+          l1: null,
+          proficiency: "intermediate",
+          confident: true,
+          usage,
+        };
+      }
+      const value =
+        field === "name"
+          ? "Maria"
+          : field === "context"
+            ? "work meetings"
+            : "sounding more natural";
+      return { value, l1: null, proficiency: null, confident: true, usage };
+    });
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", AUTH_HEADERS);
+    const queue = mixedQueue(ws);
+    await queue.next(); // session_started
+    await drainSpokenLine(queue);
+
+    const fields: Array<"name" | "l1" | "proficiency" | "context" | "goals"> = [
+      "name",
+      "l1",
+      "proficiency",
+      "context",
+      "goals",
+    ];
+    let profileUpdated: Extract<ServerToClientMessage, { type: "profile_updated" }> | undefined;
+    for (const field of fields) {
+      emitStartOfTurn();
+      emitEndOfTurn(`answer for ${field}`);
+      await drainSpokenLine(queue);
+      emitStartOfTurn();
+      emitEndOfTurn("yes");
+      for (;;) {
+        const frame = await queue.next();
+        if (frame.kind === "json" && frame.message.type === "profile_updated") {
+          profileUpdated = frame.message;
+        }
+        if (frame.kind === "json" && frame.message.type === "reply_audio_end") break;
+      }
+    }
+
+    expect(profileUpdated).toEqual({
+      type: "profile_updated",
+      name: "Maria",
+      l1: "spanish",
+      proficiency: "intermediate",
+      context: "work meetings",
+      goals: "sounding more natural",
+    });
 
     ws.terminate();
     await app.close();

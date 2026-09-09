@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildApp } from "./app.js";
+import { buildApp, parseWebOrigins } from "./app.js";
 
 describe("GET /health", () => {
   it("returns 200 with a status ok payload", async () => {
@@ -30,5 +30,26 @@ describe("GET /api/session", () => {
     expect(response.statusCode).toBe(401);
 
     await app.close();
+  });
+});
+
+describe("parseWebOrigins", () => {
+  it("parses a single exact origin", () => {
+    expect(parseWebOrigins("https://example.com")).toEqual(["https://example.com"]);
+  });
+
+  it("parses a comma-separated list of exact origins", () => {
+    expect(parseWebOrigins("https://a.com, https://b.com")).toEqual([
+      "https://a.com",
+      "https://b.com",
+    ]);
+  });
+
+  it("parses a slash-wrapped entry as a regex", () => {
+    const [origin] = parseWebOrigins("/^https:\\/\\/kalli-.*\\.vercel\\.app$/");
+
+    expect(origin).toBeInstanceOf(RegExp);
+    expect("https://kalli-abc123-holmes-tech.vercel.app").toMatch(origin as RegExp);
+    expect("https://evil.com").not.toMatch(origin as RegExp);
   });
 });

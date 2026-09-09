@@ -11,7 +11,7 @@ type OnboardingState =
   | { status: "complete" };
 
 function isOnboarded(response: OnboardingStatusResponse): boolean {
-  return response.l1 !== null && response.consentGivenAt !== null;
+  return response.consentGivenAt !== null;
 }
 
 export function AuthenticatedApp() {

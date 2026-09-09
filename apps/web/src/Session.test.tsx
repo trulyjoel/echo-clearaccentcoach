@@ -831,6 +831,50 @@ describe("Session", () => {
     expect(FakeMediaSource.instances[0]?.sourceBuffers[0]?.appendedText()).toBe("first-chunk");
   });
 
+  it("does not throw when the server sends profile_updated", async () => {
+    const { ws } = await startAndOpenSession();
+
+    ws.emitServerMessage({
+      type: "profile_updated",
+      name: "Maria",
+      l1: "spanish",
+      proficiency: "intermediate",
+      context: "work meetings",
+      goals: "sounding more natural",
+    });
+
+    // No UI assertion — the test's job is just proving the exhaustive switch handles this
+    // variant without throwing or leaving the session in a broken state. The button staying
+    // "Stop session" (not reverting to an error/starting state) is that proof.
+    expect(screen.getByRole("button", { name: "Stop session" })).toBeInTheDocument();
+  });
+
+  it("does not throw when the server sends turn_pronunciation_errors", async () => {
+    const { ws } = await startAndOpenSession();
+
+    emitUserTurn(ws, "test turn");
+    ws.emitServerMessage({
+      type: "turn_pronunciation_errors",
+      turnId: "turn-1",
+      createdAt: "2026-07-18T12:00:00.000Z",
+      errors: [
+        {
+          id: "error-1",
+          word: "like",
+          op: "sub",
+          expectedPhoneme: "L",
+          spokenPhoneme: "R",
+          source: "audio",
+        },
+      ],
+    });
+
+    // No UI assertion — no correction panel exists for pronunciation errors yet. The test's job
+    // is just proving the exhaustive switch handles this variant without throwing or leaving the
+    // session in a broken state, same as the profile_updated case above.
+    expect(screen.getByRole("button", { name: "Stop session" })).toBeInTheDocument();
+  });
+
   describe("error clip/target-audio playback", () => {
     const fetchMock = vi.fn();
 
