@@ -287,17 +287,17 @@ underneath this mapping.
 
 ## Known follow-ups (not resolved by this design)
 
-- **`ACCEPTABLE_REALIZATIONS` (`pipeline.py`) is ARPAbet-keyed** (e.g. `{"D": {"DX"}}`) and doesn't
-  apply on the IPA comparison path, where canonical phones are lowercase IPA symbols. This means the
-  flap-tolerance behavior that exists specifically to suppress a real false positive on fluent native
-  speech (see the original GOP spec) is silently absent for the comparison model — every native flap
-  will log as a `sub` on the comparison path that HuPER's own path correctly suppresses. Worth
-  becoming a per-`Recognizer` field (mirroring `non_phone_tokens`) in a follow-up, once real log data
-  shows whether this actually produces a meaningful volume of noise.
-- **`blank=0` is hardcoded** in `score_pronunciation`'s `forced_align` call. Correct for both models
-  today (both happen to put their pad/blank token at id 0), but it's the same category of
-  model-specific assumption `non_phone_tokens` was pulled out of `pipeline.py` for — worth deriving
-  from the recognizer directly (or at least asserting) if a third recognizer is ever added.
+- **`blank=0` is still hardcoded** in `score_pronunciation`'s `forced_align` call, not derived from
+  the recognizer. Correct for both models today (both happen to put their pad/blank token at id 0),
+  and now asserted explicitly in `Wav2Vec2XlsrRecognizer.__init__` so a future model with a different
+  blank id fails loudly at load time instead of silently misaligning — but the call site itself would
+  still need a code change (not just a new assertion) if a third recognizer ever violates the
+  assumption.
+
+Resolved during final review, after this design first shipped: `ACCEPTABLE_REALIZATIONS` moved from
+a shared ARPAbet-keyed `pipeline.py` constant to a per-`Recognizer` `acceptable_realizations` field
+(mirroring `non_phone_tokens`), so the comparison model's IPA-keyed flap tolerance (`{"d": {"ɾ"}}`)
+now actually takes effect on the comparison path.
 
 ## Further notes
 
