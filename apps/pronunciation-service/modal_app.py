@@ -4,7 +4,7 @@ import modal
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 
 from handler import InvalidRequestError, UnauthorizedError, handle_score_request
-from models import HuperRecognizer
+from models import HuperRecognizer, Wav2Vec2XlsrRecognizer
 from schemas import ScoreResponse
 
 
@@ -14,6 +14,20 @@ def _download_recognizer() -> None:
 
     Wav2Vec2Processor.from_pretrained("huper29/huper_recognizer")
     WavLMForCTC.from_pretrained("huper29/huper_recognizer")
+
+
+def _download_comparison_recognizer() -> None:
+    # Both imports below are only installed inside the Modal image, not the local venv.
+    from huggingface_hub import hf_hub_download  # ty: ignore[unresolved-import]
+    from transformers import (  # ty: ignore[unresolved-import]
+        Wav2Vec2FeatureExtractor,
+        Wav2Vec2ForCTC,
+    )
+
+    repo_id = "facebook/wav2vec2-xlsr-53-espeak-cv-ft"
+    Wav2Vec2FeatureExtractor.from_pretrained(repo_id)
+    Wav2Vec2ForCTC.from_pretrained(repo_id)
+    hf_hub_download(repo_id, "vocab.json")
 
 
 image = (
@@ -29,8 +43,11 @@ image = (
         "python-multipart==0.0.32",
         "pydantic==2.13.5",
     )
-    .add_local_python_source("handler", "models", "pipeline", "schemas", copy=True)
+    .add_local_python_source(
+        "arpabet_to_ipa", "handler", "models", "pipeline", "schemas", copy=True
+    )
     .run_function(_download_recognizer)
+    .run_function(_download_comparison_recognizer)
 )
 
 app = modal.App("kalli-pronunciation-service", image=image)
@@ -42,6 +59,7 @@ class PronunciationService:
     @modal.enter()
     def load(self) -> None:
         self.recognizer = HuperRecognizer()
+        self.comparison_recognizer = Wav2Vec2XlsrRecognizer()
 
     @modal.asgi_app()
     def web(self) -> FastAPI:
@@ -60,6 +78,7 @@ class PronunciationService:
             try:
                 return handle_score_request(
                     self.recognizer,
+                    self.comparison_recognizer,
                     await audio.read(),
                     canonical_phones,
                     authorization,
