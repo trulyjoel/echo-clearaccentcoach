@@ -254,7 +254,7 @@ def _del_row(probs: dict[str, float]) -> list[float]:
 
 class _PadVocabFakeRecognizer:
     """Same shape as FakeRecognizer, but with the real recognizer's uppercase "<PAD>" spelling so
-    NON_PHONE_TOKENS actually matches it."""
+    non_phone_tokens actually matches it."""
 
     def __init__(self, log_probs: torch.Tensor):
         self._log_probs = log_probs
