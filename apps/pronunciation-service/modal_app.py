@@ -1,3 +1,4 @@
+import logging
 import os
 
 import modal
@@ -6,6 +7,11 @@ from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 from handler import InvalidRequestError, UnauthorizedError, handle_score_request
 from models import HuperRecognizer, Wav2Vec2XlsrRecognizer
 from schemas import ScoreResponse
+
+# Configured once here, in the container entrypoint Modal actually imports and runs - not in
+# handler.py, which is a library module other things import. Without this, the root logger's
+# default WARNING level silently drops handler.py's INFO-level comparison-scoring log line.
+logging.basicConfig(level=logging.INFO)
 
 
 def _download_recognizer() -> None:
