@@ -1,223 +1,313 @@
-# ZIPA-CR parallel comparison scoring (alongside HuPER-GOP)
+# `wav2vec2-xlsr-53-espeak-cv-ft` parallel comparison scoring (alongside HuPER-GOP)
 
 ## Problem
 
 `2026-09-08-gop-pronunciation-scoring-design.md` replaced the HuPER Corrector with GOP scoring
 against `huper29/huper_recognizer`, shipped it, and deployed it live. Testing the live service with
 real audio (a native English speaker vs. a Spanish-accented speaker, word set "Rock/Red/Arrow/Try")
-found a structural limitation, not a training gap: **the current backend cannot detect a trilled R
-vs. the English approximant R, and no amount of retraining fixes it.** ARPAbet — the phone inventory
-this whole pipeline is built on, from `g2p.ts` through the recognizer's own output vocabulary — has
-exactly one symbol for R. English doesn't phonemically contrast trill/tap/approximant, so ARPAbet
-collapses them all into one label; the output space itself has no slot for the distinction.
+found a structural limitation: **the current backend cannot detect a trilled R vs. the English
+approximant R.** ARPAbet — the phone inventory this whole pipeline is built on, from `g2p.ts` through
+the recognizer's own output vocabulary — has exactly one symbol for R.
 
-This matters beyond R: the user's actual goal, confirmed explicitly, is to stay in English as the
-target language while detecting mispronunciations from learners across many different L1
-backgrounds. Different L1s substitute different non-English allophones into English target phones
-(Spanish trills, a Japanese tap-like liquid standing in for both R and L, French/German uvular R,
-and so on) — ARPAbet's single-symbol-per-English-phoneme design makes *every one* of these invisible
-to the current pipeline, not just the R case that happened to get tested first.
+Further live testing against the deployed service (not a spike — the actual `/score` endpoint,
+via `scoreAudioFile.ts`) during this same investigation showed the gap is narrower than first
+assumed. HuPER-GOP, unmodified, already correctly flags:
+
+- **Japanese L1's L/R merger** — `sub (expected=L, spoken=R)`, confirmed on 4 real recordings
+  ("especially"/"completed", two speakers/repeats each).
+- **Final-obstruent devoicing** — `sub (expected=D, spoken=T)` and equivalents, confirmed on both
+  a Spanish-accented speaker ("Bad"→`B AH T`, "Cod"→`K AA T`, "Job"→`JH AA P`, "Love"→`L AA F`) and
+  the Japanese-L1 "completed" sample (`D`→`T`).
+- **Spanish's b/v merger** — this is the case the original GOP-vs-Corrector spec's own spike
+  evidence was built on ("very"/"berry" collapsing sharply at the canonical phone, GOP -7.6 to -8.3).
+
+These all work because **ARPAbet already has separate symbols for both sides of the
+contrast** (`L`/`R`, `D`/`T`, `B`/`V`) — GOP only needed the recognizer to prefer the wrong
+*existing* symbol, which it does. The real, still-confirmed-open gap is narrower and more specific:
+**contrasts ARPAbet has no symbol for at all**, not L1 substitution detection broadly. Beyond the
+rhotic case, this includes (surveyed against common ESL-pedagogy L1-transfer patterns, not yet
+spiked individually):
+
+- **Retroflex-for-alveolar substitutions** (Hindi/Indian English `T`/`D`/`N`/`L`/`S` produced
+  retroflex) — ARPAbet has no retroflex marking, the same shape of gap as rhotics, affecting a large
+  population of learners.
+- **Dark-L vs. clear-L** (velarized `L`, common Russian/Slavic/Portuguese transfer) — ARPAbet's
+  single `L` symbol doesn't distinguish, the same shape of gap again.
+- **Aspiration contrasts** (Hindi's four-way and Korean's three-way stop systems misapplied to
+  English stops) — ARPAbet doesn't encode aspiration at all, since English doesn't phonemically
+  contrast it.
+
+Separately, **consonant-cluster vowel epenthesis** (Spanish "estudent," Japanese "sutoraiku," and
+similar patterns across many L1s) is invisible regardless of which recognizer model is used — it's
+an *insertion*, and `forced_align` structurally can't represent an extra phone absent from the
+canonical target. This was already an explicit Non-goal of the shipped GOP design and isn't
+something a second model changes.
 
 ## Candidate selection
 
 The first candidate considered, `xinjli/allosaurus` (ICASSP 2020), was rejected after checking its
-actual maintenance signal, not just its reputation: Open Source Insights' scorecard shows **zero
-commits and zero issue activity in the last 90 days**, one release ever (2021), last push April
-2024, and it's GPL-3.0-licensed — a heavier copyleft obligation than anything else in this stack. A
-single-author, dormant package is a poor foundation for a service meant to run indefinitely.
+actual maintenance signal: Open Source Insights' scorecard shows zero commits and zero issue
+activity in the last 90 days, one release ever (2021), last push April 2024, and GPL-3.0 licensing —
+a single-author, dormant package is a poor foundation for a service meant to run indefinitely.
 
-Surveying the actual current research line on this exact problem (universal/cross-lingual phone
-recognition, standardized on a metric called PFER — phone-feature error rate, from PanPhon
-articulatory features) surfaced better-fitting, actively-maintained options. Benchmarked against
-each other in the ZIPA paper (ACL 2025, `lingjzhu/zipa`) and again in PhoneticXeus's paper
-(Interspeech 2026), on the same held-out multilingual/accented-English evaluation:
+The second candidate, `ZIPA-CR-small` (ACL 2025, `lingjzhu/zipa`), was chosen next: actively
+maintained (real commits within the last ~2 months, MIT-licensed), and beats both Allosaurus and
+`wav2vec2-xlsr-53-espeak-cv-ft` on the published aggregate multilingual phone-recognition benchmark
+(PFER). It was set aside after a direct local spike of `wav2vec2-xlsr-53-espeak-cv-ft` (below)
+produced clean, confident, real-audio evidence on the exact contrasts this project cares about —
+strong enough to prefer it over ZIPA-CR's better-on-average-but-unverified-here benchmark edge,
+combined with its meaningfully lower dependency risk (see "Dependency risk" below).
 
-| | Allosaurus | `wav2vec2-xlsr-53-espeak-cv-ft` | **ZIPA-CR** | PhoneticXeus |
-|---|---|---|---|---|
-| Published | 2020 | 2021 | 2025 | 2026 |
-| Params | 11M | 300M | 64M (small) – 300M (large) | 0.6B |
-| Multilingual PFER | worst of the four | middling | beats Allosaurus & wav2vec2-xlsr-53 with fewer params | best reported |
-| Loading | bespoke `allosaurus` pip package, own serving code | `transformers.Wav2Vec2ForCTC` | ONNX Runtime, standalone script, no arbitrary code execution | `transformers.AutoModel(..., trust_remote_code=True)` |
-| License | GPL-3.0 | Apache-2.0 | MIT | not yet checked |
-| Maturity signal | dormant since 2024 | static checkpoint, fine | actively used, real GitHub history | created this year, 18 stars |
+**Chosen: `facebook/wav2vec2-xlsr-53-espeak-cv-ft`** — a `Wav2Vec2ForCTC` model (Meta AI, Apache-2.0),
+self-supervised pretraining on 53 languages then CTC fine-tuned for phoneme recognition across 42
+CommonVoice, 19 BABEL, and 6 MLS languages (including Spanish), from "Simple and Effective Zero-shot
+Cross-lingual Phoneme Recognition" (Xu, Baevski, Auli — Interspeech 2022). 392-symbol IPA vocabulary,
+confirmed (via its `vocab.json`) to include separate symbols for every contrast this investigation
+has tested: `r`(31)/`ɹ`(27)/`ɾ`(15)/`ʁ`(28) for rhotics, `b`(26)/`v`(25) for the Spanish merger.
 
-**Chosen: `ZIPA-CR-small`** (`anyspeech/zipa-small-crctc-500k` on Hugging Face). It's purpose-built
-for this exact problem, beats both older candidates on the standard benchmark, is CTC-based (see
-"Why CTC matters" below) so it plugs into the forced-alignment pipeline already built for HuPER, is
-MIT-licensed, and its 64M-parameter size works in favor of the "scoring runs inline" decision below
-rather than against it. PhoneticXeus reports better numbers, including a result specifically on
-accented English, but was set aside for now: it requires `trust_remote_code=True` (executes the
-model repo's own Python at load time — a real supply-chain trust decision, not just friction) and
-is a month old at the time of this design. Worth revisiting once it's had more real-world vetting.
+### Local spike evidence (real audio, this session)
+
+Ran the model directly (`transformers.Wav2Vec2ForCTC` + `Wav2Vec2Processor`, greedy CTC decode)
+against every real sample in `apps/server/pronunciation-scorer-test/`:
+
+**Rhotic contrast**, "Rock Red Arrow Try": English speaker's 4 R's all decode `ɹ` (argmax
+probability 0.89–0.94); Spanish speaker's 6 R's all decode `r` (trill, 0.90–0.98) — clean top-1
+separation, not just a raised competing-candidate probability the way the Allosaurus spike needed.
+
+**b/v contrast**: "very" → `v` (0.976); "berry" → `b` (0.976).
+
+**Independent confirmation on continuous speech** (the "Next vacation I'd love to visit the river"
+fixture, unprompted — not a minimal pair): native "river" → `ɹ ɪ v ɚ`; Spanish-accented "river" →
+`r i v e r` (trill, no rhotic vowel) — third independent rhotic confirmation. The Spanish speaker's
+"vacation" also came out missing its leading `v` (`p eɪ k...` instead of `v eɪ k...`), consistent
+with Spanish's b/v instability showing up organically.
+
+**"Bad/Cod/Job/Love" minimal set** (native vs. Spanish-accented, same speaker pair, verified split
+via the ~1.06s inter-speaker silence gap): Spanish accented "Bad"→`b a t` (devoiced), "Love"→`l ɔ`
+(v dropped). Less complete than HuPER's own decode of the same audio (which caught devoicing on all
+four words, see "Problem" above) — worth being honest that on this specific test, HuPER's WavLM
+backbone was *more* consistent than this candidate, not less. The candidate's value isn't "better
+than HuPER at everything," it's "sees things HuPER structurally cannot."
+
+**"Especially/Completed" Japanese L1 set**: after deploying, real audio confirmed HuPER itself
+already flags `sub (expected=L, spoken=R)` for the Japanese L/R merger and `sub (expected=D,
+spoken=T)` for final devoicing — both catchable because ARPAbet already has separate symbols for
+both sides. This is what narrowed the "Problem" framing above; it isn't a wav2vec2-xlsr-53-specific
+finding.
+
+### Dependency risk
+
+| | Allosaurus | ZIPA-CR | **wav2vec2-xlsr-53-espeak-cv-ft** |
+|---|---|---|---|
+| Loading | bespoke `allosaurus` pip package | `onnxruntime` + standalone script | `transformers.Wav2Vec2ForCTC` — already-pinned library, same pattern as `HuperRecognizer` |
+| License | GPL-3.0 | MIT | Apache-2.0 |
+| Maintainer | dormant since 2024 | active, single maintainer | static checkpoint (Meta), no ongoing maintenance needed — same risk tier as `huper29/huper_recognizer` itself |
+| `trust_remote_code` | n/a | not needed | not needed |
+
+This is the lowest-risk tier of any candidate considered — the same tier HuPER's own production
+dependency is already in.
 
 ## Why CTC matters here
 
-`HuperRecognizer` and `ZIPA-CR` are both CTC (Connectionist Temporal Classification) models: at
+`HuperRecognizer` and this candidate are both CTC (Connectionist Temporal Classification) models: at
 every audio frame they independently output a probability distribution over phones (plus a blank
 token), with no built-in notion of phone boundaries. `torchaudio.functional.forced_align` takes that
 raw `(frames × vocab)` matrix plus a known target phone sequence and finds the most probable
 frame-by-frame path producing exactly those phones — which is how `_group_into_spans` gets per-phone
 frame ranges and how GOP (canonical phone's probability vs. the best-scoring alternative) gets
-computed. `ZIPA-T`, the family's transducer variant, doesn't expose that same per-frame matrix (its
-predictions condition on its own prior outputs); it would need real extra work to fit this pipeline,
-which is why `ZIPA-CR` (the CTC variant) is the one chosen, not a naming coincidence.
+computed. This candidate being `Wav2Vec2ForCTC` (not a transducer, unlike `ZIPA-T`) means it plugs
+into the exact same mechanism with no new alignment strategy needed.
 
 ## Goals
 
-- Run `ZIPA-CR-small` through the same GOP pipeline as HuPER, on the same audio, for every scored
-  turn — as a **comparison signal to observe, not a replacement**. HuPER-GOP stays the thing that
-  actually determines what the app shows a user.
+- Run `wav2vec2-xlsr-53-espeak-cv-ft` through the same GOP pipeline as HuPER, on the same audio, for
+  every scored turn — as a **comparison signal to observe, not a replacement**. HuPER-GOP stays the
+  thing that actually determines what the app shows a user.
 - Keep `apps/pronunciation-service`'s HTTP contract, `schemas.py`, and every TS-side consumer
   (`apps/server/src/pronunciation.ts`, `g2p.ts`, `session.ts`) exactly as they are — this is a
   Python-service-internal addition only, same boundary the GOP migration itself preserved.
-- Build the ARPAbet→ZIPA-IPA phone mapping, including a real answer for diphthongs (see "Diphthong
+- Build the ARPAbet→IPA phone mapping, including a real answer for diphthongs (see "Diphthong
   handling" below) rather than a lossy shortcut.
+- Specifically observe the narrowed set of contrasts identified in "Problem" — rhotic realizations
+  foremost, with retroflex-for-alveolar, dark/light-L, and aspiration contrasts as secondary
+  targets worth watching for once comparison data exists.
 
 ## Non-goals
 
-- **Serving ZIPA's result to the app, or persisting it anywhere durable.** Decided explicitly: log
-  it, don't wire it. If the comparison data turns out to be worth querying later, that's a separate
-  follow-up with its own design (a schema/store decision deserves its own scrutiny, not a rider on
-  this one).
-- **Deciding whether to eventually replace HuPER with ZIPA.** This design produces the data to make
-  that call later; it doesn't make the call now.
+- **Serving this model's result to the app, or persisting it anywhere durable.** Decided explicitly:
+  log it, don't wire it. If the comparison data turns out to be worth querying later, that's a
+  separate follow-up with its own design.
+- **Deciding whether to eventually replace HuPER.** This design produces the data to make that call
+  later; it doesn't make the call now.
 - **Using the learner's L1 (already captured at onboarding) to bias scoring.** Worth revisiting once
   comparison data exists, not decided here.
+- **Solving insertion detection (consonant-cluster epenthesis).** Structurally out of reach for
+  `forced_align` regardless of which recognizer is used — already a Non-goal of the shipped GOP
+  design, unaffected by this addition.
 - **Optimizing latency.** Scoring runs inline, doubling per-turn model-inference cost for the
-  duration of the comparison period — an explicit, accepted trade for implementation simplicity over
-  a fire-and-forget background path. `ZIPA-CR-small`'s 64M-parameter size keeps this trade cheaper
-  than it would otherwise be. Revisit if real measured latency threatens `SCORE_TURN_TIMEOUT_MS`
-  (`apps/server/src/pronunciation.ts`).
-- **Re-evaluating PhoneticXeus.** Noted above as a stronger-benchmarked alternative set aside for
-  `trust_remote_code` and maturity reasons — a candidate for later, not part of this design.
+  duration of the comparison period. Unlike `ZIPA-CR-small` (64M params), this candidate is ~300M
+  params — essentially the same size class as HuPER itself, so this is a real, roughly 2x latency
+  cost, not a cheap add-on. Accepted as an explicit trade for implementation simplicity over a
+  fire-and-forget background path. Measured post-deploy: cold-start (first request on a fresh
+  container, both models loading) came in at ~9.7s, right at the edge of `SCORE_TURN_TIMEOUT_MS`
+  (10s, `apps/server/src/pronunciation.ts`) — matches HuPER's own previously-observed cold-start
+  behavior, not a new problem this feature introduced. Warm-container requests measured at ~450ms,
+  comfortably clear of the timeout — the latency risk is a cold-start phenomenon only, not a
+  steady-state concern.
 
 ## Architecture
 
 ```
 apps/pronunciation-service/
-├── modal_app.py        # image gains ZIPA-CR's deps (onnxruntime + a small torch-free inference
-│                        # path where possible) + a checkpoint download step; PronunciationService
+├── modal_app.py        # image gains this candidate's checkpoint download step; PronunciationService
 │                        # .load() instantiates both recognizers
 ├── handler.py           # handle_score_request gains a second recognizer param; HuPER result is still
 │                        # the only thing in ScoreResponse
-├── models.py             # + ZipaRecognizer, alongside the existing HuperRecognizer
-├── arpabet_to_ipa.py       # new: static phone-mapping table + to_zipa_phones()
-├── pipeline.py              # unchanged — score_pronunciation is already model-agnostic
+├── models.py             # + Wav2Vec2XlsrRecognizer, alongside the existing HuperRecognizer
+├── arpabet_to_ipa.py       # new: static phone-mapping table + to_ipa_phones()
+├── pipeline.py              # Recognizer protocol gains non_phone_tokens (per-instance, not a
+│                            # shared HuPER-shaped constant) — score_pronunciation itself unchanged
 ├── schemas.py                # unchanged
 └── tests/
-    ├── test_models.py          # + ZipaRecognizer coverage
     ├── test_arpabet_to_ipa.py   # new
-    └── test_handler.py           # + case: ZIPA failure doesn't affect ScoreResponse
+    └── test_handler.py           # + case: comparison-model failure doesn't affect ScoreResponse
 ```
 
-### `ZipaRecognizer` (`models.py`)
+### `Wav2Vec2XlsrRecognizer` (`models.py`)
 
 Satisfies the same `Recognizer` protocol `pipeline.py` already defines (`label2id`, `id2label`,
-`log_probs(waveform)`), wrapping `ZIPA-CR-small`'s ONNX-exported checkpoint
-(`anyspeech/zipa-small-crctc-500k`) via `onnxruntime` — chosen deliberately over ZIPA's full
-`icefall`/`k2`/`lhotse` training-stack inference path specifically to keep the image's dependency
-footprint small, in the same spirit as rejecting Allosaurus for its footprint. `label2id`/`id2label`
-come from the model's own `tokens.txt` vocabulary. The exact ONNX Runtime session input/output tensor
-shapes and `tokens.txt` parsing need to be confirmed against the actual exported artifact — see
-"Deferred to implementation."
+`non_phone_tokens`, `log_probs(waveform)`). Loads via `Wav2Vec2FeatureExtractor` + `Wav2Vec2ForCTC`
+directly — confirmed during implementation to work without pulling in `phonemizer`/`espeak-ng` (the
+full `Wav2Vec2Processor` would need those for its bundled tokenizer's text→phoneme encoding, which
+this use case never exercises; only the acoustic model's raw log-probs are used). `label2id`/
+`id2label` are read from the model's own `vocab.json` via `huggingface_hub.hf_hub_download`.
+`non_phone_tokens` is built dynamically from `model.config.pad_token_id`/`bos_token_id`/
+`eos_token_id` read back through `id2label` — never a hardcoded literal token string, since the
+model's special-token spellings (confirmed empirically: `<pad>`/`<s>`/`</s>`/`<unk>`) don't need to
+be assumed in advance this way.
 
 ### Phone mapping (`arpabet_to_ipa.py`)
 
-A static `ARPABET_TO_IPA: dict[str, tuple[str, ...]]` mapping each ARPAbet phone `pipeline.py` may
-see (from `g2p.ts`'s output vocabulary) to one or more of ZIPA's IPA symbols, plus:
+A static `ARPABET_TO_IPA: dict[str, str]` mapping each of the 39 ARPAbet phones `g2p.ts`'s
+`HUPER_VALID_PHONES` may produce (`AA`...`ZH`, `DX` included) to a single IPA symbol in this model's
+vocabulary, plus:
 
 ```python
-def to_zipa_phones(canonical_phones: list[CanonicalWord]) -> list[CanonicalWord]:
-    """Rewrites each word's ARPAbet phones into ZIPA's IPA symbols for comparison scoring."""
+def to_ipa_phones(canonical_phones: list[CanonicalWord]) -> list[CanonicalWord]:
+    """Rewrites each word's ARPAbet phones into the comparison model's IPA symbols."""
 ```
 
-**Diphthong handling:** ARPAbet writes diphthongs (`AY`, `AW`, `EY`, `OW`, `OY`) as a single token;
-IPA inventories (ZIPA's included) have separate symbols for the onset and offset vowel, no single
-symbol for the diphthong as a unit. Decided: expand each diphthong into its two-phone IPA sequence at
-mapping time, rather than collapsing to one approximate symbol — `score_pronunciation` already
-handles a variable number of phones per word (it just repeats `(word, word_index)` per phone), so
-this needs no changes there. The one real consequence: a single ARPAbet diphthong can now produce up
-to two edit ops in ZIPA's output where HuPER's would produce (at most) one. Since this output is
-logged, not served or counted, that's an acceptable asymmetry — not something a consumer needs to
-reconcile.
+**Diphthong handling — resolved, not a two-phone expansion.** ARPAbet writes diphthongs (`AY`,
+`AW`, `EY`, `OW`, `OY`) as a single token; the initial assumption was that IPA in general has no
+single symbol for a diphthong and a two-phone onset/offset expansion would be needed. Checking this
+model's actual `vocab.json` resolved that: it already has dedicated single-token symbols for every
+one of these (`aɪ`, `aʊ`, `eɪ`, `oʊ`, `ɔɪ` all confirmed present and used in this session's real
+audio decodes). So the mapping table is a plain 1:1 dict for all 39 entries — no `CanonicalWord`
+length changes, no `word_positions` bookkeeping concerns.
+
+`R` maps to `ɹ` — the canonical English approximant, not the trill `r`. This direction matters: the
+whole point of this comparison model is noticing when the audio's actual phone is the "wrong"
+trill/tap/uvular alternative instead of the canonical approximant.
 
 ### `handle_score_request` (`handler.py`)
 
-Gains a `zipa_recognizer: Recognizer` parameter. After building the `ScoreResponse` from HuPER's
-result exactly as today, it calls:
+Gains a second `Recognizer` parameter. After building the `ScoreResponse` from HuPER's result
+exactly as today, it calls:
 
 ```python
 try:
-    zipa_ops = score_pronunciation(zipa_recognizer, waveform, to_zipa_phones(words))
-    logger.info("zipa comparison: %s", zipa_ops)
+    comparison_ops = score_pronunciation(comparison_recognizer, waveform, to_ipa_phones(words))
+    logger.info(
+        "comparison scoring: words=%s huper=%s comparison=%s",
+        [w.word for w in words], edit_ops, comparison_ops,
+    )
 except Exception:
-    logger.exception("zipa comparison scoring failed")
+    logger.exception("comparison scoring failed for words=%s", [w.word for w in words])
 ```
 
 before returning the (unchanged) `ScoreResponse`. This is the only place that catches broadly —
-`score_pronunciation` and `ZipaRecognizer` themselves stay strict (raise on bad input, same contract
-as the HuPER path), because a real, independently-correct function is what makes the comparison data
-trustworthy. The swallowing happens at the call site because *that call's result* is diagnostic, not
-because the function itself is allowed to be sloppy.
+`score_pronunciation` and `Wav2Vec2XlsrRecognizer` themselves stay strict (raise on bad input, same
+contract as the HuPER path), because a real, independently-correct function is what makes the
+comparison data trustworthy. The swallowing happens at the call site because *that call's result* is
+diagnostic, not because the function itself is allowed to be sloppy. The log line includes both
+sides of the comparison (HuPER's `edit_ops` and the comparison model's `comparison_ops`) plus the
+turn's words, since a comparison-only feature is useless if its log can't actually be compared
+against anything or correlated to a turn.
 
 ### `modal_app.py`
 
 `PronunciationService.load()` (the existing `@modal.enter()` hook) instantiates both
-`HuperRecognizer` and `ZipaRecognizer`, and passes both into `handle_score_request`. The image gains
-`onnxruntime` and a download step for `ZIPA-CR-small`'s ONNX checkpoint + `tokens.txt` (from
-`anyspeech/zipa-small-crctc-500k` on Hugging Face, via `huggingface_hub` — already a pinned
-dependency), mirroring the existing `_download_recognizer` pattern. Whether any additional package
-beyond `onnxruntime` is needed for pre/post-processing is unverified — see "Deferred to
-implementation."
+`HuperRecognizer` and `Wav2Vec2XlsrRecognizer`, and passes both into `handle_score_request`. The
+image gains a download step for `facebook/wav2vec2-xlsr-53-espeak-cv-ft`'s weights via
+`huggingface_hub` (already a pinned dependency, same mechanism as `_download_recognizer`) — no new
+package family needed; the phonemizer-free loading path was confirmed to work. `logging.basicConfig`
+is configured at module level here (the actual container entrypoint), not in `handler.py` — this
+service had no logging configuration anywhere before this change, which meant `logger.info` calls
+were silent no-ops under Python's default root-logger level (WARNING). Confirmed via a real deploy
+that comparison-scoring log lines are now actually visible in `modal app logs`.
 
 ## Data flow
 
 One `/score` request → `handle_score_request` decodes audio once (unchanged `decode_audio` +
 `load_waveform`) → scores with HuPER against ARPAbet canonical phones (served, unchanged) → scores
-the same waveform with ZIPA-CR against IPA-mapped canonical phones (logged only) → returns exactly
-today's `ScoreResponse`.
+the same waveform with the comparison model against IPA-mapped canonical phones (logged only) →
+returns exactly today's `ScoreResponse`.
 
 ## Error handling
 
-`score_pronunciation` and `ZipaRecognizer` raise on bad input exactly like the HuPER path already
-does (out-of-vocabulary phone, audio too short, etc.) — no special-casing for ZIPA inside those
+`score_pronunciation` and `Wav2Vec2XlsrRecognizer` raise on bad input exactly like the HuPER path
+already does (out-of-vocabulary phone, audio too short, etc.) — no special-casing inside those
 functions. `handle_score_request`'s comparison call is wrapped in a single broad `try/except
-Exception`, logged and dropped, so a ZIPA-side failure (model issue, mapping gap, anything) never
-changes the HTTP status code or response body a caller sees.
+Exception`, logged and dropped, so a comparison-side failure (model issue, mapping gap, anything)
+never changes the HTTP status code or response body a caller sees.
+
+**Mapping-table coverage is asserted at container start, not left to fail per-request.** Since
+`score_pronunciation` raises `ValueError` on any canonical phone absent from the recognizer's
+vocabulary, and that raise is caught and merely logged by the try/except above, an incomplete
+`ARPABET_TO_IPA` entry would otherwise degrade silently — fewer comparison log lines, indistinguishable
+from fewer real mispronunciations. `PronunciationService.load()` asserts
+`set(ARPABET_TO_IPA.values()) <= set(recognizer.label2id)` once at startup, turning a silent
+per-request degradation into a loud deploy-time failure if the model's vocabulary ever changes
+underneath this mapping.
 
 ## Testing
 
-- `tests/test_models.py`: `ZipaRecognizer` tested the same way `HuperRecognizer` is — a fake covering
-  `label2id`/`id2label`/`log_probs`, no real model load in unit tests.
 - `tests/test_arpabet_to_ipa.py`: table coverage for a plain phone (1:1 mapping), a diphthong
-  (2-phone expansion), and an out-of-table phone (explicit failure, not a silent drop).
-- `tests/test_handler.py`: existing HuPER-path cases unchanged; new case asserts a raised exception
-  from the ZIPA call site is caught and the returned `ScoreResponse` is identical to what it would be
-  without the comparison call at all.
+  (confirms the model's own single-symbol entry is used, not a two-phone expansion), the `R`→`ɹ`
+  directionality, multi-word boundary preservation, and an out-of-table phone (explicit failure, not
+  a silent drop).
+- `tests/test_handler.py`: existing HuPER-path cases unchanged; cases assert a raised exception from
+  the comparison call site is caught and the returned `ScoreResponse` is identical to what it would
+  be without the comparison call at all, and that a successful comparison call logs both sides.
+- `Wav2Vec2XlsrRecognizer` itself has no unit test — this codebase's existing precedent is that
+  `HuperRecognizer` (the analogous class) also has zero unit-test coverage, since a real test would
+  require a real model download; verified instead via a manual smoke test against real audio and,
+  ultimately, the live deploy itself.
 - No TS-side test changes — the wire contract doesn't move.
 
-## Deferred to implementation (research tasks, not resolved by this design)
+## Known follow-ups (not resolved by this design)
 
-- **ONNX Runtime integration shape.** `ZipaRecognizer`'s exact session input/output tensor shapes,
-  and whether any preprocessing beyond `load_waveform`'s existing 16kHz-mono output is needed —
-  verify against the actual exported model and `lingjzhu/zipa`'s `inference/inference.py`, not
-  assumed from the README's CLI usage.
-- **Checkpoint download step.** Confirm `anyspeech/zipa-small-crctc-500k`'s exact file layout on
-  Hugging Face (the ONNX weights file plus `tokens.txt`) for the image's download/bake step.
-- **Non-phone token set.** HuPER's `NON_PHONE_TOKENS` (`<PAD>`, `<UNK>`, `<BOS>`, `<EOS>`, `|`) is
-  specific to its vocabulary; ZIPA's CTC blank/special-token set must be confirmed against its actual
-  `tokens.txt`, not assumed to match.
-- **Full `ARPABET_TO_IPA` table contents.** The mapping shape (including diphthong expansion) is
-  decided; the specific IPA symbol chosen for each ARPAbet phone needs to be checked against ZIPA's
-  actual vocabulary, not guessed from general IPA knowledge.
-- **License confirmation for PhoneticXeus**, if it's ever revisited — not checked as part of this
-  design since it wasn't chosen.
+- **`ACCEPTABLE_REALIZATIONS` (`pipeline.py`) is ARPAbet-keyed** (e.g. `{"D": {"DX"}}`) and doesn't
+  apply on the IPA comparison path, where canonical phones are lowercase IPA symbols. This means the
+  flap-tolerance behavior that exists specifically to suppress a real false positive on fluent native
+  speech (see the original GOP spec) is silently absent for the comparison model — every native flap
+  will log as a `sub` on the comparison path that HuPER's own path correctly suppresses. Worth
+  becoming a per-`Recognizer` field (mirroring `non_phone_tokens`) in a follow-up, once real log data
+  shows whether this actually produces a meaningful volume of noise.
+- **`blank=0` is hardcoded** in `score_pronunciation`'s `forced_align` call. Correct for both models
+  today (both happen to put their pad/blank token at id 0), but it's the same category of
+  model-specific assumption `non_phone_tokens` was pulled out of `pipeline.py` for — worth deriving
+  from the recognizer directly (or at least asserting) if a third recognizer is ever added.
 
 ## Further notes
 
-`ZIPA-CR-small` is meaningfully newer and better-maintained than Allosaurus, but is still a
-research-lab artifact (ACL 2025), not a `transformers`-native model backed by a large ongoing org the
-way `huper29/huper_recognizer`'s underlying WavLM architecture is. Its production maturity, like
-Allosaurus's would have been, is a real open question the parallel-comparison period is partly meant
-to answer — the difference is it starts from real, current, actively-used footing rather than a
-four-year-dormant one.
+`facebook/wav2vec2-xlsr-53-espeak-cv-ft` is a static, Meta-published checkpoint served purely through
+`transformers` — the same low-maintenance-risk profile as `huper29/huper_recognizer`'s own production
+dependency, and meaningfully lower risk than either Allosaurus (confirmed dormant) or ZIPA-CR
+(actively maintained, but still a single-author research artifact). The three L1-transfer contrasts
+confirmed working on the live, already-deployed HuPER-GOP service during this investigation (Japanese
+L/R merger, final-obstruent devoicing, Spanish b/v) mean this addition's practical value is narrower
+and more specific than the original problem statement implied: it's for contrasts ARPAbet has no
+symbol for at all (rhotics, confirmed via live deploy; retroflex-for-alveolar, dark/light-L, and
+aspiration contrasts, plausible but not yet spiked individually), not L1-driven mispronunciation
+broadly.
