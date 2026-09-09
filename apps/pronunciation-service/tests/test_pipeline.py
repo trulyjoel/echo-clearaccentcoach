@@ -90,6 +90,7 @@ class FakeRecognizer:
         self._log_probs = log_probs
         self.label2id = _LABEL2ID
         self.id2label = _ID2LABEL
+        self.non_phone_tokens = frozenset({"<pad>"})
 
     def log_probs(self, waveform: object) -> torch.Tensor:
         return self._log_probs
@@ -190,6 +191,7 @@ def test_score_pronunciation_scores_the_trailing_phone_after_a_blank_separated_r
         def __init__(self) -> None:
             self.label2id = label2id
             self.id2label = id2label
+            self.non_phone_tokens = frozenset({"<pad>"})
 
         def log_probs(self, waveform: object) -> torch.Tensor:
             return log_probs
@@ -258,6 +260,7 @@ class _PadVocabFakeRecognizer:
         self._log_probs = log_probs
         self.label2id = _DEL_LABEL2ID
         self.id2label = _DEL_ID2LABEL
+        self.non_phone_tokens = frozenset({"<PAD>"})
 
     def log_probs(self, waveform: object) -> torch.Tensor:
         return self._log_probs

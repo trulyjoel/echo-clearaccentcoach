@@ -4,6 +4,13 @@ class HuperRecognizer:
     hack is needed; it's loadable through `transformers` alone.
     """
 
+    # Non-phone classes in HuPER's vocabulary (blank/padding and other special CTC tokens). A span
+    # where these dominate the per-frame argmax is the recognizer's honest signal that nothing was
+    # really articulated there, not a real (mispronounced) phone — see score_pronunciation's
+    # deletion check. Every Recognizer implementation declares its own — this set is specific to
+    # HuPER's vocabulary spelling and must not be assumed to match any other model's.
+    non_phone_tokens: frozenset[str] = frozenset({"<PAD>", "<UNK>", "<BOS>", "<EOS>", "|"})
+
     def __init__(self, repo_id: str = "huper29/huper_recognizer") -> None:
         import torch
         from transformers import Wav2Vec2Processor, WavLMForCTC  # ty: ignore[unresolved-import]

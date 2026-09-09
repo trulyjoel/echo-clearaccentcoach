@@ -40,19 +40,15 @@ ACCEPTABLE_REALIZATIONS: dict[str, set[str]] = {
     "T": {"DX"},
 }
 
-# Non-phone classes in the recognizer's vocabulary (blank/padding and other special CTC tokens).
-# A span where these dominate the per-frame argmax is the recognizer's honest signal that nothing
-# was really articulated there, not a real (mispronounced) phone — see score_pronunciation's
-# deletion check.
-NON_PHONE_TOKENS = {"<PAD>", "<UNK>", "<BOS>", "<EOS>", "|"}
-
 
 class Recognizer(Protocol):
     """What score_pronunciation needs from a phone-recognition model — satisfied structurally by
-    models.py's HuperRecognizer, with no inheritance relationship required."""
+    models.py's HuperRecognizer and Wav2Vec2XlsrRecognizer, with no inheritance relationship
+    required."""
 
     label2id: dict[str, int]
     id2label: dict[int, str]
+    non_phone_tokens: frozenset[str]
 
     def log_probs(self, waveform) -> torch.Tensor:
         """Returns log-softmax'd per-frame class log-probabilities, shape (1, T, C)."""
@@ -103,7 +99,7 @@ def score_pronunciation(
     spans = _group_into_spans(aligned[0].tolist())
 
     non_phone_ids = [
-        id_ for id_, label in recognizer.id2label.items() if label in NON_PHONE_TOKENS
+        id_ for id_, label in recognizer.id2label.items() if label in recognizer.non_phone_tokens
     ]
     non_phone_mask = torch.zeros(log_probs.shape[-1])
     non_phone_mask[non_phone_ids] = float("-inf")
