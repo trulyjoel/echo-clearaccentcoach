@@ -2,7 +2,7 @@ from schemas import CanonicalWord
 
 # Every ARPAbet phone g2p.ts's HUPER_VALID_PHONES set may produce (see
 # apps/server/src/g2p.ts), plus DX (the flap allophone HuPER's own output vocabulary includes even
-# though g2p never targets it directly — see pipeline.py's ACCEPTABLE_REALIZATIONS), mapped to its
+# though g2p never targets it directly — see models.py's acceptable_realizations), mapped to its
 # corresponding symbol in facebook/wav2vec2-xlsr-53-espeak-cv-ft's IPA vocabulary. Verified against
 # that model's actual vocab.json, not assumed from general IPA knowledge. Every entry is a single
 # symbol — this vocabulary already has dedicated single-token symbols for every English diphthong
