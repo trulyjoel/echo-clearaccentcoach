@@ -6,6 +6,10 @@ Goodness-of-Pronunciation scoring. See
 scaffolding) and `docs/superpowers/specs/2026-09-08-gop-pronunciation-scoring-design.md` (the
 current scoring approach) for the design.
 
+Since 2026-09-08, every scored turn is also scored against
+`facebook/wav2vec2-xlsr-53-espeak-cv-ft` for comparison — logged only, never served to the app. See
+`docs/superpowers/specs/2026-09-08-wav2vec2-xlsr53-comparison-scoring-design.md` for why.
+
 ## Local development
 
 ```bash
