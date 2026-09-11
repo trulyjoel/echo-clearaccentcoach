@@ -11,8 +11,8 @@ describe("detectAsrSmoothedDeviations", () => {
       {
         word: "very",
         op: "sub",
-        expectedPhoneme: "V",
-        spokenPhoneme: "B",
+        expectedPhoneme: "v",
+        spokenPhoneme: "b",
         source: "transcript_revision",
       },
     ]);
