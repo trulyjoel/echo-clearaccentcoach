@@ -4,8 +4,8 @@ from pydantic import BaseModel
 
 
 class CanonicalWord(BaseModel):
-    """One transcript word and its canonical ARPAbet phones, matching `apps/server/src/g2p.ts`'s
-    `CanonicalWord` shape exactly."""
+    """One transcript word and its canonical wav2vec2-xlsr-53-espeak-cv-ft IPA phones, matching
+    `apps/server/src/g2p.ts`'s `CanonicalWord` shape exactly."""
 
     word: str
     phones: list[str]
