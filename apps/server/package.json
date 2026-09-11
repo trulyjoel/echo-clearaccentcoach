@@ -7,6 +7,8 @@
   "scripts": {
     "dev": "tsx watch --env-file=.env src/index.ts",
     "compare-tts": "tsx --env-file=.env src/scripts/compareTts.ts",
+    "test-pronunciation-scorer": "tsx --env-file=.env src/scripts/testPronunciationScorer.ts",
+    "score-audio-file": "tsx --env-file=.env src/scripts/scoreAudioFile.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
@@ -17,16 +19,16 @@
   "dependencies": {
     "@ai-sdk/anthropic": "4.0.16",
     "@aws-sdk/client-s3": "3.1090.0",
-    "@kalli/types": "workspace:*",
     "@clerk/fastify": "3.1.52",
     "@deepgram/sdk": "5.6.0",
     "@elevenlabs/elevenlabs-js": "2.58.0",
     "@fastify/cors": "11.3.0",
     "@fastify/websocket": "11.3.0",
+    "@kalli/types": "workspace:*",
     "ai": "7.0.31",
     "drizzle-orm": "0.45.2",
     "fastify": "5.10.0",
-    "phonemize": "1.2.0",
+    "phonemizer": "1.2.1",
     "postgres": "3.4.9",
     "zod": "4.4.3"
   },

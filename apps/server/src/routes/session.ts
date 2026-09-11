@@ -136,7 +136,7 @@ async function analyzeTurn(
   priorTranscripts: string[],
   log: FastifyBaseLogger,
 ): Promise<TurnAnalysis> {
-  const canonicalPhones = g2p(transcript);
+  const canonicalPhones = await g2p(transcript);
   const [analysisResult, pronunciationResult] = await Promise.allSettled([
     getLLMProvider().analyzeErrors(transcript, l1),
     getPronunciationProvider().scoreTurn(audio, canonicalPhones),
@@ -151,11 +151,14 @@ async function analyzeTurn(
   if (pronunciationResult.status === "fulfilled") {
     pronunciationErrors = toDetectedPronunciationErrors(pronunciationResult.value);
   } else {
-    log.error(pronunciationResult.reason, "Failed to score pronunciation");
+    log.error(
+      { err: pronunciationResult.reason, audioBytes: audio.length },
+      "Failed to score pronunciation",
+    );
   }
   pronunciationErrors = [
     ...pronunciationErrors,
-    ...detectAsrSmoothedDeviations(transcript, priorTranscripts),
+    ...(await detectAsrSmoothedDeviations(transcript, priorTranscripts)),
   ];
 
   const analysis = analysisResult.value;

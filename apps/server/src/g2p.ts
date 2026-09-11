@@ -1,9 +1,4 @@
-import { createRequire } from "module";
-// A plain `import { phonemize } from "phonemize"` throws `ERR_IMPORT_ATTRIBUTE_MISSING` on Node 26
-// (this repo's runtime): the package's bundled `anyascii.json` import lacks a `type: "json"`
-// import attribute. Loading it via `require` instead sidesteps ESM import-attribute enforcement.
-const require = createRequire(import.meta.url);
-const { phonemize } = require("phonemize") as typeof import("phonemize");
+import { phonemize } from "phonemizer";
 
 /** One transcript word and its canonical (target-accent) ARPAbet phones, stress-digit-free and
  * restricted to HuPER's 39-phone vocabulary (verified against the installed model's tokenizer). */
@@ -13,7 +8,7 @@ export interface CanonicalWord {
 }
 
 /** Matches runs of word characters and apostrophes (so contractions like "don't" stay one word),
- * discarding surrounding punctuation — `phonemize` would otherwise treat punctuation as its own
+ * discarding surrounding punctuation — `phonemizer` would otherwise treat punctuation as its own
  * token. */
 const WORD_PATTERN = /[\p{L}\p{N}']+/gu;
 
@@ -26,63 +21,78 @@ export const HUPER_VALID_PHONES = new Set([
   "W", "Y", "Z", "ZH",
 ]);
 
-/** `phonemize` emits a number of extended-ARPAbet symbols outside HuPER's 39-phone vocabulary
- * (verified directly against the installed `phonemize` package by running its en-US G2P over a
- * ~40k-word English sample and diffing the resulting symbol set against `HUPER_VALID_PHONES`).
- * Each entry maps a `phonemize` output to the HuPER-valid phone(s) it corresponds to, chosen from
- * that symbol's own IPA definition in `phonemize`'s ARPABET_TO_IPA table. `SAW` is the most
- * consequential: `phonemize` never emits the standard `AO` symbol for the /ɔ/ vowel (its
- * IPA<->ARPAbet reverse-mapping table happens to prefer `SAW` for that IPA symbol) — this is the
- * same vowel HuPER folds into `AA` (cot-caught merger) rather than keeping as a separate `AO`. */
-const PHONE_NORMALIZATION: Record<string, string[]> = {
-  AX: ["AH"], // reduced schwa -> nearest HuPER vowel
-  AXR: ["ER"], // r-colored schwa (e.g. "-er" in "teacher") -> unstressed ER
-  EL: ["AH", "L"], // syllabic L (e.g. "little") -> vowel + consonant
-  IN: ["IH", "N"], // reduced -ing/-in nasal -> vowel + nasal
-  EN: ["AH", "N"], // reduced -en/-on nasal (e.g. "cotton") -> vowel + nasal
-  UN: ["UH", "N"], // reduced -un nasal -> vowel + nasal
-  SAW: ["AA"], // phonemize's alias for the AO (/ɔ/) vowel -> HuPER's merged AA
-  TS: ["T", "S"], // voiceless affricate cluster (e.g. plural "-s" after a stop) -> stop + fricative
-  AB: ["AA", "B"], // rule-based-fallback digraph -> vowel + stop
-  UA: ["UW", "AA"], // rule-based-fallback digraph -> vowel + vowel
-  UO: ["UW", "OW"], // rule-based-fallback digraph -> vowel + vowel
-  UY: ["UW", "IY"], // rule-based-fallback digraph -> vowel + vowel
-  YE: ["Y", "EH"], // rule-based-fallback digraph -> glide + vowel
+/** IPA symbol (as emitted by `phonemizer`, a WASM build of real espeak-ng) -> HuPER-valid ARPAbet
+ * phone(s). The 39 single-phone entries are the exact inverse of
+ * `apps/pronunciation-service/arpabet_to_ipa.py`'s `ARPABET_TO_IPA` table — that table is the
+ * source of truth for the ARPAbet<->IPA correspondence shared with the comparison model, so keep
+ * the two in sync. The remaining entries cover espeak-ng symbols with no ARPAbet source phone:
+ * reduced vowels, a glottal-stop /t/ allophone, and cot-caught/NURSE vowel spelling variants. */
+const IPA_TO_ARPABET: Record<string, string[]> = {
+  ɑː: ["AA"], æ: ["AE"], ʌ: ["AH"], aʊ: ["AW"], aɪ: ["AY"], b: ["B"],
+  tʃ: ["CH"], d: ["D"], ð: ["DH"], ɾ: ["DX"], ɛ: ["EH"], ɚ: ["ER"],
+  eɪ: ["EY"], f: ["F"], ɡ: ["G"], h: ["HH"], ɪ: ["IH"], iː: ["IY"],
+  dʒ: ["JH"], k: ["K"], l: ["L"], m: ["M"], n: ["N"], ŋ: ["NG"],
+  oʊ: ["OW"], ɔɪ: ["OY"], p: ["P"], ɹ: ["R"], s: ["S"], ʃ: ["SH"],
+  t: ["T"], θ: ["TH"], ʊ: ["UH"], uː: ["UW"], v: ["V"], w: ["W"],
+  j: ["Y"], z: ["Z"], ʒ: ["ZH"],
+  ə: ["AH"], // reduced schwa
+  ᵻ: ["IH"], // espeak's "barred i" — reduced /ɪ/
+  ʔ: ["T"], // glottal-stop realization of /t/ (e.g. "cotton")
+  ɔː: ["AA"], // /ɔ/ (cot-caught merger, same as HuPER folding AO into AA)
+  ɜː: ["ER"], // NURSE vowel spelled without its rhotic glide (e.g. "world")
+  i: ["IY"], // unstressed short "happY" vowel (e.g. word-final "-y" in "very")
+  // espeak shortens a long vowel's citation form (no "ː") in some unstressed/less-prominent
+  // syllables (e.g. "stronger" -> "stɹɔŋɡɚ", not "...ɔːŋ...") — same vowel, same ARPAbet target.
+  ɑ: ["AA"],
+  u: ["UW"],
+  ɔ: ["AA"],
+  ɜ: ["ER"],
+  ɐ: ["AH"], // another reduced/near-schwa vowel espeak uses in unstressed syllables (e.g. "along")
+  oː: ["AA"], // NORTH/FORCE vowel before /r/ (e.g. "more") — monophthongal, not the OW diphthong
 };
 
-function normalizePhone(phone: string): string[] {
-  return PHONE_NORMALIZATION[phone] ?? [phone];
+/** Sorted longest-symbol-first so multi-character IPA symbols (diphthongs, affricates, long
+ * vowels) match before any single-character symbol that happens to be their prefix. */
+const IPA_SYMBOLS = Object.keys(IPA_TO_ARPABET).sort((a, b) => b.length - a.length);
+
+/** Combining vertical line below (U+0329) — espeak's syllabicity diacritic, e.g. "cotton" ->
+ * "kˈɑːʔn̩". Rewritten to an explicit preceding schwa before tokenizing, matching how espeak
+ * already spells syllabic L directly as schwa + consonant (e.g. "little" -> "lˈɪɾəl") rather than
+ * a diacritic. */
+const SYLLABIC_MARK = /(.)̩/gu;
+
+function tokenizeIpa(ipa: string): string[] {
+  const cleaned = ipa.replace(/[ˈˌ]/gu, "").replace(SYLLABIC_MARK, "ə$1");
+  const phones: string[] = [];
+  let i = 0;
+  while (i < cleaned.length) {
+    if (cleaned[i] === " ") {
+      i += 1;
+      continue;
+    }
+    const symbol = IPA_SYMBOLS.find((s) => cleaned.startsWith(s, i));
+    if (!symbol) {
+      throw new Error(`No ARPAbet mapping for IPA symbol in "${cleaned}" at index ${i}`);
+    }
+    phones.push(...IPA_TO_ARPABET[symbol]!);
+    i += symbol.length;
+  }
+  return phones;
 }
 
 /**
  * G2P's the turn's transcript into a word-aligned canonical ARPAbet phone sequence, used as the
  * "expected" reference the pronunciation-scoring service diffs the actual audio against.
- * Dictionary words come from `phonemize`'s bundled CMUdict-derived lexicon; out-of-dictionary
- * words (names, coinages) fall through to its rule-based G2P automatically — both paths return
- * through the same call, so this function doesn't need to know which one fired.
+ * `phonemizer` is called once per word — not once per transcript — so a numeral or other
+ * multi-token expansion (e.g. "1995" -> "nineteen hundred ninety five") still resolves to exactly
+ * one `CanonicalWord`, keeping phones word-index-aligned with the transcript for the caller.
  */
-export function g2p(transcript: string): CanonicalWord[] {
+export async function g2p(transcript: string): Promise<CanonicalWord[]> {
   const words = transcript.match(WORD_PATTERN) ?? [];
-  return words.map((word) => {
-    const result = phonemize(word, {
-      language: "en-US",
-      format: "arpabet",
-      stripStress: true,
-      returnArray: true,
-    });
-    // `phonemize` returns one entry per output token, expanding/transliterating during
-    // tokenization (e.g. "1995" -> "nineteen"/"ninety"/"five") — every entry's phones must be
-    // included, not just the first, or multi-token words get silently truncated.
-    const phones = result
-      .flatMap((token) => token.phoneme.split(" "))
-      // `phonemize` emits the literal string "undefined" for characters it can't map (e.g. some
-      // non-Latin scripts) — drop it rather than pass a non-phone token through as a canonical
-      // phone.
-      .filter((p) => p.length > 0 && p !== "undefined")
-      .flatMap(normalizePhone);
-    return {
-      word,
-      phones,
-    };
-  });
+  const canonicalWords: CanonicalWord[] = [];
+  for (const word of words) {
+    const [ipa] = await phonemize(word, "en-us");
+    canonicalWords.push({ word, phones: tokenizeIpa(ipa ?? "") });
+  }
+  return canonicalWords;
 }
