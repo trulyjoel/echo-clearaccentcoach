@@ -1,34 +1,14 @@
-import logging
 import os
 
 import modal
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 
-from arpabet_to_ipa import ARPABET_TO_IPA
 from handler import InvalidRequestError, UnauthorizedError, handle_score_request
-from models import HuperRecognizer, Wav2Vec2XlsrRecognizer
+from models import Wav2Vec2XlsrRecognizer
 from schemas import ScoreResponse
-
-# Configured once here, in the container entrypoint Modal actually imports and runs - not in
-# handler.py, which is a library module other things import. Without this, the root logger's
-# default WARNING level silently drops handler.py's INFO-level comparison-scoring log line.
-logging.basicConfig(level=logging.INFO)
-# Belt-and-braces: if a future Modal SDK version installs its own root handler before this module
-# runs, basicConfig above becomes a no-op (it only configures when no handler exists yet), which
-# would silently reintroduce the exact bug this logging setup exists to fix. Setting handler.py's
-# logger level directly is independent of the root logger's configuration state.
-logging.getLogger("handler").setLevel(logging.INFO)
 
 
 def _download_recognizer() -> None:
-    # ty: ignore[unresolved-import] -- only installed inside the Modal image, not the local venv
-    from transformers import Wav2Vec2Processor, WavLMForCTC
-
-    Wav2Vec2Processor.from_pretrained("huper29/huper_recognizer")
-    WavLMForCTC.from_pretrained("huper29/huper_recognizer")
-
-
-def _download_comparison_recognizer() -> None:
     # Both imports below are only installed inside the Modal image, not the local venv.
     from huggingface_hub import hf_hub_download  # ty: ignore[unresolved-import]
     from transformers import (  # ty: ignore[unresolved-import]
@@ -55,11 +35,8 @@ image = (
         "python-multipart==0.0.32",
         "pydantic==2.13.5",
     )
-    .add_local_python_source(
-        "arpabet_to_ipa", "handler", "models", "pipeline", "schemas", copy=True
-    )
+    .add_local_python_source("handler", "models", "pipeline", "schemas", copy=True)
     .run_function(_download_recognizer)
-    .run_function(_download_comparison_recognizer)
 )
 
 app = modal.App("kalli-pronunciation-service", image=image)
@@ -70,17 +47,7 @@ auth_secret = modal.Secret.from_name("pronunciation-service-auth")
 class PronunciationService:
     @modal.enter()
     def load(self) -> None:
-        self.recognizer = HuperRecognizer()
-        self.comparison_recognizer = Wav2Vec2XlsrRecognizer()
-        # Without this, a wrong ARPABET_TO_IPA entry silently drops every turn's comparison result
-        # forever (score_pronunciation raises ValueError, handler.py's try/except only logs it) —
-        # indistinguishable in logs from "no mispronunciation found." Fail loud at deploy time
-        # instead.
-        missing = set(ARPABET_TO_IPA.values()) - set(self.comparison_recognizer.label2id)
-        assert not missing, (
-            f"ARPABET_TO_IPA maps IPA symbols missing from comparison recognizer's vocabulary: "
-            f"{missing}"
-        )
+        self.recognizer = Wav2Vec2XlsrRecognizer()
 
     @modal.asgi_app()
     def web(self) -> FastAPI:
@@ -99,7 +66,6 @@ class PronunciationService:
             try:
                 return handle_score_request(
                     self.recognizer,
-                    self.comparison_recognizer,
                     await audio.read(),
                     canonical_phones,
                     authorization,
