@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { g2p, HUPER_VALID_PHONES } from "./g2p.js";
+import { CANONICAL_VALID_PHONES, g2p } from "./g2p.js";
 
 describe("g2p", () => {
-  it("produces word-aligned ARPAbet phones with no stress digits for a dictionary word", async () => {
+  it("produces word-aligned canonical phones with no stress digits for a dictionary word", async () => {
     const result = await g2p("cat");
 
-    expect(result).toEqual([{ word: "cat", phones: expect.arrayContaining(["K", "AE", "T"]) }]);
+    expect(result).toEqual([{ word: "cat", phones: ["k", "æ", "t"] }]);
     for (const { phones } of result) {
       for (const phone of phones) expect(phone).not.toMatch(/[0-9]/);
     }
@@ -37,20 +37,20 @@ describe("g2p", () => {
     expect(await g2p("   ")).toEqual([]);
   });
 
-  it("every phone g2p ever emits is a member of HuPER's 39-phone vocabulary", async () => {
+  it("every phone g2p ever emits is a member of wav2vec2's 39-phone vocabulary", async () => {
     const result = await g2p("I like cats hello 1995");
     for (const { phones } of result) {
-      for (const phone of phones) expect(HUPER_VALID_PHONES.has(phone)).toBe(true);
+      for (const phone of phones) expect(CANONICAL_VALID_PHONES.has(phone)).toBe(true);
     }
   });
 
-  it("normalizes espeak-ng's reduced schwa to a HuPER-valid phone for a word known to trigger it", async () => {
+  it("normalizes espeak-ng's reduced schwa to a canonical phone for a word known to trigger it", async () => {
     const result = await g2p("hello");
 
     expect(result).toHaveLength(1);
-    // "hello" -> /həlˈoʊ/ — the unstressed first syllable's schwa must resolve to AH, not pass
-    // through as the raw IPA "ə" (which HuPER's vocabulary doesn't recognize).
-    expect(result[0]?.phones).toEqual(["HH", "AH", "L", "OW"]);
+    // "hello" -> /həlˈoʊ/ — the unstressed first syllable's schwa must resolve to "ʌ", not pass
+    // through as the raw IPA "ə" (which isn't in wav2vec2's target vocabulary).
+    expect(result[0]?.phones).toEqual(["h", "ʌ", "l", "oʊ"]);
   });
 
   it("joins phones from every expanded entry for a number, without truncating to just the first", async () => {
@@ -62,7 +62,7 @@ describe("g2p", () => {
     // that only reads the first entry would produce far fewer phones than this.
     expect(result[0]?.phones.length).toBeGreaterThan(5);
     for (const phone of result[0]?.phones ?? []) {
-      expect(HUPER_VALID_PHONES.has(phone)).toBe(true);
+      expect(CANONICAL_VALID_PHONES.has(phone)).toBe(true);
     }
   });
 
@@ -73,7 +73,7 @@ describe("g2p", () => {
     expect(result[0]?.word).toBe("naïve");
     expect(result[0]?.phones.length).toBeGreaterThan(0);
     for (const phone of result[0]?.phones ?? []) {
-      expect(HUPER_VALID_PHONES.has(phone)).toBe(true);
+      expect(CANONICAL_VALID_PHONES.has(phone)).toBe(true);
     }
   });
 });
