@@ -4,7 +4,7 @@ import type { CanonicalWord } from "./g2p.js";
 import { getPronunciationProvider, warmUpPronunciationService } from "./pronunciation.js";
 
 function fakeLogger(): FastifyBaseLogger {
-  return { warn: vi.fn() } as unknown as FastifyBaseLogger;
+  return { warn: vi.fn(), info: vi.fn() } as unknown as FastifyBaseLogger;
 }
 
 const SAMPLE_PHONES: CanonicalWord[] = [{ word: "like", phones: ["L", "AY", "K"] }];
