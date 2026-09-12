@@ -247,6 +247,19 @@ function getInworldApiKey(): string {
  * problem (waiting seconds for a whole-utterance blob) fixed: genuine within-sentence streaming,
  * not just a fast model.
  */
+function parseInworldLine(line: string): Buffer | undefined {
+  const trimmed = line.trim();
+  if (!trimmed) return undefined;
+  const parsed = JSON.parse(trimmed) as { result?: { audioContent?: string }; error?: unknown };
+  if (parsed.error) {
+    throw new Error(`Inworld TTS stream returned an error: ${JSON.stringify(parsed.error)}`);
+  }
+  return parsed.result?.audioContent ? Buffer.from(parsed.result.audioContent, "base64") : undefined;
+}
+
+/** Inworld doesn't always terminate its stream's final NDJSON record with a trailing newline, so
+ * the last line can still be sitting unprocessed in `buffer` once the reader reports `done` —
+ * flushed the same way as every newline-delimited line above it. */
 async function* parseInworldStream(body: ReadableStream<Uint8Array>): AsyncIterable<Uint8Array> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
@@ -257,20 +270,15 @@ async function* parseInworldStream(body: ReadableStream<Uint8Array>): AsyncItera
     buffer += decoder.decode(value, { stream: true });
     let newlineIndex = buffer.indexOf("\n");
     while (newlineIndex !== -1) {
-      const line = buffer.slice(0, newlineIndex).trim();
+      const line = buffer.slice(0, newlineIndex);
       buffer = buffer.slice(newlineIndex + 1);
       newlineIndex = buffer.indexOf("\n");
-      if (!line) continue;
-      const parsed = JSON.parse(line) as {
-        result?: { audioContent?: string };
-        error?: unknown;
-      };
-      if (parsed.error) {
-        throw new Error(`Inworld TTS stream returned an error: ${JSON.stringify(parsed.error)}`);
-      }
-      if (parsed.result?.audioContent) yield Buffer.from(parsed.result.audioContent, "base64");
+      const audio = parseInworldLine(line);
+      if (audio) yield audio;
     }
   }
+  const audio = parseInworldLine(buffer);
+  if (audio) yield audio;
 }
 
 /**
