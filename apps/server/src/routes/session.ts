@@ -65,6 +65,14 @@ const MAX_TRANSCRIPT_LENGTH = 4000;
  */
 const MAX_PROFILE_FIELD_LENGTH = 200;
 
+/** First 4 bytes of a WebM/Matroska file's EBML header — every fresh MediaRecorder instance emits
+ * this on its first chunk. Used to detect a genuinely new recorder's output amid stray chunks. */
+const WEBM_EBML_HEADER_MAGIC = Buffer.from([0x1a, 0x45, 0xdf, 0xa3]);
+
+function startsWithWebmHeader(chunk: Buffer): boolean {
+  return chunk.subarray(0, WEBM_EBML_HEADER_MAGIC.length).equals(WEBM_EBML_HEADER_MAGIC);
+}
+
 interface CompleteProfile {
   name: string;
   l1: L1;
@@ -361,6 +369,12 @@ export function registerSessionRoutes(app: FastifyInstance): void {
       // Session.tsx), so this always holds one turn's worth of chunks from a single, fresh
       // recorder instance — header chunk through last fragment, contiguous and self-contained.
       let turnAudioChunks: Buffer[] = [];
+      // The old recorder keeps emitting chunks until the client actually processes `end_of_turn`
+      // and calls stop() — a round trip after this server already reset turnAudioChunks below. Any
+      // chunk arriving in that window is a stray fragment of the OLD recorder's stream, not the new
+      // one's, and must not become the new turn's leading bytes. Gating on the real WebM header
+      // (rather than trusting message timing) survives that race.
+      let awaitingTurnHeader = false;
       /** Every distinct transcript Flux has emitted for the turn in progress, in order — lets a
        * later `EndOfTurn` be compared against what Flux hypothesized before it settled (see
        * docs/superpowers/specs/2026-09-05-flux-transcript-revision-detection-design.md). Reset at
@@ -884,6 +898,7 @@ export function registerSessionRoutes(app: FastifyInstance): void {
           send({ type: "end_of_turn" });
           const turnAudio = Buffer.concat(turnAudioChunks);
           turnAudioChunks = [];
+          awaitingTurnHeader = true;
           const priorTranscripts = turnTranscriptHistory;
           turnTranscriptHistory = [];
           if (data.transcript) {
@@ -923,6 +938,10 @@ export function registerSessionRoutes(app: FastifyInstance): void {
           // process.
           if (ended) return;
           deepgramConnection.sendMedia(message);
+          if (awaitingTurnHeader) {
+            if (!startsWithWebmHeader(message)) return;
+            awaitingTurnHeader = false;
+          }
           turnAudioChunks.push(message);
           return;
         }

@@ -2096,6 +2096,12 @@ describe("usage metering", () => {
   });
 });
 
+/** A chunk starting with the real WebM/Matroska EBML magic bytes, as a fresh MediaRecorder's first
+ * chunk would — needed once a turn boundary has passed and the server is gating on a real header. */
+function webmHeaderChunk(rest: number[]): Buffer {
+  return Buffer.concat([Buffer.from([0x1a, 0x45, 0xdf, 0xa3]), Buffer.from(rest)]);
+}
+
 describe("audio clip capture + storage", () => {
   const sampleError: DetectedError = {
     category: "subject_verb_agreement",
@@ -2198,17 +2204,58 @@ describe("audio clip capture + storage", () => {
     emitEndOfTurn("first turn");
     for (let i = 0; i < 8; i++) await queue.next();
 
-    ws.send(Buffer.from([2]));
+    // Server is now waiting for the next recorder's real header, so turn 2's chunk must carry it.
+    const turn2 = webmHeaderChunk([2]);
+    ws.send(turn2);
     await new Promise((resolve) => setTimeout(resolve, 20));
     emitEndOfTurn("second turn");
     for (let i = 0; i < 8; i++) await queue.next();
 
     // The client restarts its MediaRecorder after every end_of_turn, so each turn's chunks are
-    // its own fresh recorder instance's output — turn 2's clip is just [2], not [1, 2].
+    // its own fresh recorder instance's output — turn 2's clip is just its header chunk, not [1, ...].
     const uploads = storageTestState.getUploads();
     expect(uploads).toHaveLength(2);
     expect(uploads[0]?.data).toEqual(Buffer.from([1]));
-    expect(uploads[1]?.data).toEqual(Buffer.from([2]));
+    expect(uploads[1]?.data).toEqual(turn2);
+
+    ws.terminate();
+    await app.close();
+  });
+
+  it("drops stray chunks from the old recorder that arrive before the next turn's header", async () => {
+    // Regression test for the race where the old MediaRecorder keeps emitting chunks for the
+    // network round trip between this server resetting the audio buffer and the client actually
+    // processing `end_of_turn` and restarting its recorder. Those stray chunks must not become
+    // the new turn's leading (headerless) bytes — see the corrupt-WebM bug this guards against.
+    await giveConsent();
+    llmTestState.setAnalyzeImpl(async () => [sampleError]);
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    await queue.next(); // session_started
+    await drainSpokenLine(queue);
+
+    ws.send(Buffer.from([1]));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    emitEndOfTurn("first turn");
+    for (let i = 0; i < 8; i++) await queue.next();
+
+    // Stray tail chunk from the OLD (not-yet-stopped) recorder, followed by the new recorder's
+    // real header once the client actually restarts it.
+    ws.send(Buffer.from([99]));
+    const turn2 = webmHeaderChunk([2]);
+    ws.send(turn2);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    emitEndOfTurn("second turn");
+    for (let i = 0; i < 8; i++) await queue.next();
+
+    const uploads = storageTestState.getUploads();
+    expect(uploads).toHaveLength(2);
+    expect(uploads[1]?.data).toEqual(turn2);
 
     ws.terminate();
     await app.close();
