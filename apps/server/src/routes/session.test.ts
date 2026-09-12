@@ -2186,19 +2186,18 @@ describe("audio clip capture + storage", () => {
     emitEndOfTurn("second turn");
     for (let i = 0; i < 8; i++) await queue.next();
 
-    // The first-ever chunk ([1]) is the clip's WebM container header, so it's carried forward
-    // into every later turn's clip too — turn 2 gets its own chunk ([2]) with that header
-    // prepended, not a bare [2], since a headerless fragment alone isn't independently playable.
+    // The client restarts its MediaRecorder after every end_of_turn, so each turn's chunks are
+    // its own fresh recorder instance's output — turn 2's clip is just [2], not [1, 2].
     const uploads = storageTestState.getUploads();
     expect(uploads).toHaveLength(2);
     expect(uploads[0]?.data).toEqual(Buffer.from([1]));
-    expect(uploads[1]?.data).toEqual(Buffer.from([1, 2]));
+    expect(uploads[1]?.data).toEqual(Buffer.from([2]));
 
     ws.terminate();
     await app.close();
   });
 
-  it("trims excess pre-speech noise before StartOfTurn but keeps a pre-roll window and the container header", async () => {
+  it("keeps every chunk since the previous turn boundary, including pre-speech silence before StartOfTurn", async () => {
     await giveConsent();
     llmTestState.setAnalyzeImpl(async () => [sampleError]);
     const app = buildApp();
@@ -2211,12 +2210,10 @@ describe("audio clip capture + storage", () => {
     await queue.next(); // session_started
     await drainSpokenLine(queue);
 
-    // Chunk 1 is the session's first-ever chunk (the WebM header). Chunks 2-15 are silence/noise
-    // buffered before Flux judges the user actually started speaking — more than the pre-roll
-    // window (10 chunks) holds, so the oldest of them (2-5) fall out and are dropped. The window's
-    // remaining contents (6-15) are kept as lead-in when StartOfTurn fires, since Flux's own
-    // detection lags slightly behind the user's actual speech onset. The header, having long since
-    // fallen out of that window too, is re-added separately so the stored clip is still playable.
+    // Chunk 1 is the fresh recorder's WebM header. Chunks 2-15 are silence/noise buffered before
+    // Flux judges the user actually started speaking. None of it gets trimmed: the buffer is
+    // exactly one MediaRecorder instance's contiguous output, so dropping any interior chunk
+    // would break the container.
     for (let value = 1; value <= 15; value++) ws.send(Buffer.from([value]));
     await new Promise((resolve) => setTimeout(resolve, 20));
     emitStartOfTurn();
@@ -2227,7 +2224,9 @@ describe("audio clip capture + storage", () => {
 
     const uploads = storageTestState.getUploads();
     expect(uploads).toHaveLength(1);
-    expect(uploads[0]?.data).toEqual(Buffer.from([1, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]));
+    expect(uploads[0]?.data).toEqual(
+      Buffer.from([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]),
+    );
 
     ws.terminate();
     await app.close();

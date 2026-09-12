@@ -244,6 +244,16 @@ describe("Session", () => {
     expect(ws.sent).toContain(chunk);
   });
 
+  it("restarts the recorder on end_of_turn so each turn's clip starts with a fresh header", async () => {
+    const { ws } = await startAndOpenSession();
+
+    ws.emitServerMessage({ type: "end_of_turn" });
+
+    expect(FakeMediaRecorder.instances[0]?.stopped).toBe(true);
+    expect(FakeMediaRecorder.instances).toHaveLength(2);
+    expect(FakeMediaRecorder.instances[1]?.stopped).toBe(false);
+  });
+
   it("renders interim and finalized transcript as messages arrive", async () => {
     const { ws } = await startAndOpenSession();
 

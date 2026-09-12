@@ -353,26 +353,15 @@ export function registerSessionRoutes(app: FastifyInstance): void {
       }
 
       const conversationHistory: ConversationMessage[] = [];
+      // The client restarts its MediaRecorder right after every `end_of_turn` it receives (see
+      // Session.tsx), so this always holds one turn's worth of chunks from a single, fresh
+      // recorder instance — header chunk through last fragment, contiguous and self-contained.
       let turnAudioChunks: Buffer[] = [];
       /** Every distinct transcript Flux has emitted for the turn in progress, in order — lets a
        * later `EndOfTurn` be compared against what Flux hypothesized before it settled (see
        * docs/superpowers/specs/2026-09-05-flux-transcript-revision-detection-design.md). Reset at
        * `StartOfTurn` and after `EndOfTurn` consumes it. */
       let turnTranscriptHistory: string[] = [];
-      // The client records with a single MediaRecorder for the whole session, so only the very
-      // first chunk it ever emits carries the WebM/Opus container header (EBML + Segment +
-      // Tracks) — every later chunk is a headerless fragment, only meaningful appended after that
-      // header. Each stored turn clip needs its own copy of it prepended to be independently
-      // playable, since turnAudioChunks otherwise only holds that one turn's headerless fragments.
-      let webmHeaderChunk: Buffer | undefined;
-
-      // Flux needs a bit of audio before it's confident enough to fire StartOfTurn, so trimming
-      // the clip's buffer exactly at that event clips the first fraction of a second of actual
-      // speech. Keeping a short rolling pre-roll window and seeding the trimmed buffer from it
-      // (rather than starting empty) absorbs that detection latency while still dropping the bulk
-      // of the dead air/noise before it. ~800ms at the client's 80ms MediaRecorder timeslice.
-      const PRE_ROLL_CHUNK_COUNT = 10;
-      let preRollChunks: Buffer[] = [];
 
       /**
        * Tracks the turn whose LLM/TTS pipeline is currently running, so a subsequent confirmed
@@ -869,12 +858,10 @@ export function registerSessionRoutes(app: FastifyInstance): void {
 
         // StartOfTurn fires once, when Flux itself judges the user has started speaking — unlike
         // Nova-3's raw transcript stream, this is already the model's own confirmed-speech signal,
-        // not a bare VAD ping, so no extra "was this really words" check is needed here. Seeding
-        // the turn's buffer from the pre-roll window (rather than discarding everything) keeps the
-        // stored clip scoped to roughly the turn itself while still covering Flux's own detection
-        // latency, instead of clipping the first fraction-second of actual speech.
+        // not a bare VAD ping, so no extra "was this really words" check is needed here.
+        // turnAudioChunks isn't reset here: it's already accumulating fresh chunks from the
+        // client's post-EndOfTurn recorder restart, so this just leaves it running.
         if (data.event === "StartOfTurn") {
-          turnAudioChunks = [...preRollChunks];
           turnTranscriptHistory = [];
           if (activeTurn || replyPlaying) {
             if (activeTurn) {
@@ -891,10 +878,7 @@ export function registerSessionRoutes(app: FastifyInstance): void {
         if (data.event === "EndOfTurn") {
           if (data.transcript) send({ type: "transcript", text: data.transcript, isFinal: true });
           send({ type: "end_of_turn" });
-          const turnAudio =
-            !webmHeaderChunk || turnAudioChunks[0] === webmHeaderChunk
-              ? Buffer.concat(turnAudioChunks)
-              : Buffer.concat([webmHeaderChunk, ...turnAudioChunks]);
+          const turnAudio = Buffer.concat(turnAudioChunks);
           turnAudioChunks = [];
           const priorTranscripts = turnTranscriptHistory;
           turnTranscriptHistory = [];
@@ -935,10 +919,7 @@ export function registerSessionRoutes(app: FastifyInstance): void {
           // process.
           if (ended) return;
           deepgramConnection.sendMedia(message);
-          webmHeaderChunk ??= message;
           turnAudioChunks.push(message);
-          preRollChunks.push(message);
-          if (preRollChunks.length > PRE_ROLL_CHUNK_COUNT) preRollChunks.shift();
           return;
         }
 
