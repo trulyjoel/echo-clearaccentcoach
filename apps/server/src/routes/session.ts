@@ -21,13 +21,18 @@ import { DEEPGRAM_MODEL, openDeepgramConnection } from "../deepgram.js";
 import { createMarkerResolver } from "../emphasisMarkers.js";
 import { g2p } from "../g2p.js";
 import type { ConversationMessage, TokenUsage } from "../llm.js";
-import { buildReplySystemPrompt, getAnalysisModelId, getLLMProvider, pickGreeting } from "../llm.js";
+import {
+  buildReplySystemPrompt,
+  getAnalysisModelId,
+  getLLMProvider,
+  pickGreeting,
+} from "../llm.js";
 import { extractOnboardingAnswer, extractOnboardingConfirmation } from "../onboarding/extract.js";
 import type { OnboardingResult, OnboardingState } from "../onboarding/flow.js";
 import { startOnboarding, submitAnswer, submitConfirmation } from "../onboarding/flow.js";
 import { containsDisallowedContent } from "../outputGuard.js";
 import type { PronunciationEditOp } from "../pronunciation.js";
-import { getPronunciationProvider } from "../pronunciation.js";
+import { getPronunciationProvider, warmUpPronunciationService } from "../pronunciation.js";
 import { detectAsrSmoothedDeviations } from "../pronunciationRevisionDetector.js";
 import { getMaxSessionDurationMs, hasReachedDailySessionCap } from "../sessionLimits.js";
 import { splitSentences } from "../sentenceSplitter.js";
@@ -64,6 +69,14 @@ const MAX_TRANSCRIPT_LENGTH = 4000;
  * that prompt.
  */
 const MAX_PROFILE_FIELD_LENGTH = 200;
+
+/** First 4 bytes of a WebM/Matroska file's EBML header — every fresh MediaRecorder instance emits
+ * this on its first chunk. Used to detect a genuinely new recorder's output amid stray chunks. */
+const WEBM_EBML_HEADER_MAGIC = Buffer.from([0x1a, 0x45, 0xdf, 0xa3]);
+
+function startsWithWebmHeader(chunk: Buffer): boolean {
+  return chunk.subarray(0, WEBM_EBML_HEADER_MAGIC.length).equals(WEBM_EBML_HEADER_MAGIC);
+}
 
 interface CompleteProfile {
   name: string;
@@ -136,7 +149,8 @@ async function analyzeTurn(
   priorTranscripts: string[],
   log: FastifyBaseLogger,
 ): Promise<TurnAnalysis> {
-  const canonicalPhones = g2p(transcript);
+  const canonicalPhones = await g2p(transcript);
+  log.info({ audioBytes: audio.length, words: canonicalPhones.length }, "Scoring pronunciation");
   const [analysisResult, pronunciationResult] = await Promise.allSettled([
     getLLMProvider().analyzeErrors(transcript, l1),
     getPronunciationProvider().scoreTurn(audio, canonicalPhones),
@@ -150,12 +164,16 @@ async function analyzeTurn(
   let pronunciationErrors: DetectedPronunciationError[] = [];
   if (pronunciationResult.status === "fulfilled") {
     pronunciationErrors = toDetectedPronunciationErrors(pronunciationResult.value);
+    log.info({ editOps: pronunciationErrors.length }, "Pronunciation scoring complete");
   } else {
-    log.error(pronunciationResult.reason, "Failed to score pronunciation");
+    log.error(
+      { err: pronunciationResult.reason, audioBytes: audio.length },
+      "Failed to score pronunciation",
+    );
   }
   pronunciationErrors = [
     ...pronunciationErrors,
-    ...detectAsrSmoothedDeviations(transcript, priorTranscripts),
+    ...(await detectAsrSmoothedDeviations(transcript, priorTranscripts)),
   ];
 
   const analysis = analysisResult.value;
@@ -296,6 +314,10 @@ export function registerSessionRoutes(app: FastifyInstance): void {
         handleSocketMessage(message, isBinary),
       );
 
+      // Fired here, before any of the profile/DB setup below, to give it the longest possible
+      // head start on the pronunciation service's cold start before the first turn needs it.
+      warmUpPronunciationService(request.log);
+
       // preValidation already confirmed the user is authenticated.
       const userId = getAuthenticatedUserId(request);
       if (!userId) {
@@ -350,26 +372,21 @@ export function registerSessionRoutes(app: FastifyInstance): void {
       }
 
       const conversationHistory: ConversationMessage[] = [];
+      // The client restarts its MediaRecorder right after every `end_of_turn` it receives (see
+      // Session.tsx), so this always holds one turn's worth of chunks from a single, fresh
+      // recorder instance — header chunk through last fragment, contiguous and self-contained.
       let turnAudioChunks: Buffer[] = [];
+      // The old recorder keeps emitting chunks until the client actually processes `end_of_turn`
+      // and calls stop() — a round trip after this server already reset turnAudioChunks below. Any
+      // chunk arriving in that window is a stray fragment of the OLD recorder's stream, not the new
+      // one's, and must not become the new turn's leading bytes. Gating on the real WebM header
+      // (rather than trusting message timing) survives that race.
+      let awaitingTurnHeader = false;
       /** Every distinct transcript Flux has emitted for the turn in progress, in order — lets a
        * later `EndOfTurn` be compared against what Flux hypothesized before it settled (see
        * docs/superpowers/specs/2026-09-05-flux-transcript-revision-detection-design.md). Reset at
        * `StartOfTurn` and after `EndOfTurn` consumes it. */
       let turnTranscriptHistory: string[] = [];
-      // The client records with a single MediaRecorder for the whole session, so only the very
-      // first chunk it ever emits carries the WebM/Opus container header (EBML + Segment +
-      // Tracks) — every later chunk is a headerless fragment, only meaningful appended after that
-      // header. Each stored turn clip needs its own copy of it prepended to be independently
-      // playable, since turnAudioChunks otherwise only holds that one turn's headerless fragments.
-      let webmHeaderChunk: Buffer | undefined;
-
-      // Flux needs a bit of audio before it's confident enough to fire StartOfTurn, so trimming
-      // the clip's buffer exactly at that event clips the first fraction of a second of actual
-      // speech. Keeping a short rolling pre-roll window and seeding the trimmed buffer from it
-      // (rather than starting empty) absorbs that detection latency while still dropping the bulk
-      // of the dead air/noise before it. ~800ms at the client's 80ms MediaRecorder timeslice.
-      const PRE_ROLL_CHUNK_COUNT = 10;
-      let preRollChunks: Buffer[] = [];
 
       /**
        * Tracks the turn whose LLM/TTS pipeline is currently running, so a subsequent confirmed
@@ -866,12 +883,10 @@ export function registerSessionRoutes(app: FastifyInstance): void {
 
         // StartOfTurn fires once, when Flux itself judges the user has started speaking — unlike
         // Nova-3's raw transcript stream, this is already the model's own confirmed-speech signal,
-        // not a bare VAD ping, so no extra "was this really words" check is needed here. Seeding
-        // the turn's buffer from the pre-roll window (rather than discarding everything) keeps the
-        // stored clip scoped to roughly the turn itself while still covering Flux's own detection
-        // latency, instead of clipping the first fraction-second of actual speech.
+        // not a bare VAD ping, so no extra "was this really words" check is needed here.
+        // turnAudioChunks isn't reset here: it's already accumulating fresh chunks from the
+        // client's post-EndOfTurn recorder restart, so this just leaves it running.
         if (data.event === "StartOfTurn") {
-          turnAudioChunks = [...preRollChunks];
           turnTranscriptHistory = [];
           if (activeTurn || replyPlaying) {
             if (activeTurn) {
@@ -888,11 +903,9 @@ export function registerSessionRoutes(app: FastifyInstance): void {
         if (data.event === "EndOfTurn") {
           if (data.transcript) send({ type: "transcript", text: data.transcript, isFinal: true });
           send({ type: "end_of_turn" });
-          const turnAudio =
-            !webmHeaderChunk || turnAudioChunks[0] === webmHeaderChunk
-              ? Buffer.concat(turnAudioChunks)
-              : Buffer.concat([webmHeaderChunk, ...turnAudioChunks]);
+          const turnAudio = Buffer.concat(turnAudioChunks);
           turnAudioChunks = [];
+          awaitingTurnHeader = true;
           const priorTranscripts = turnTranscriptHistory;
           turnTranscriptHistory = [];
           if (data.transcript) {
@@ -932,10 +945,11 @@ export function registerSessionRoutes(app: FastifyInstance): void {
           // process.
           if (ended) return;
           deepgramConnection.sendMedia(message);
-          webmHeaderChunk ??= message;
+          if (awaitingTurnHeader) {
+            if (!startsWithWebmHeader(message)) return;
+            awaitingTurnHeader = false;
+          }
           turnAudioChunks.push(message);
-          preRollChunks.push(message);
-          if (preRollChunks.length > PRE_ROLL_CHUNK_COUNT) preRollChunks.shift();
           return;
         }
 

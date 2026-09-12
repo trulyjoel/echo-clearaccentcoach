@@ -14,8 +14,12 @@ vi.mock("@clerk/fastify", () => ({
   },
 }));
 
+const warmUp = vi.hoisted(() => vi.fn());
+vi.mock("../pronunciation.js", () => ({ warmUpPronunciationService: warmUp }));
+
 afterEach(async () => {
   await db.delete(profiles);
+  warmUp.mockClear();
 });
 
 describe("GET /api/onboarding", () => {
@@ -79,6 +83,26 @@ describe("GET /api/onboarding", () => {
     expect(body.context).toBe("work meetings");
     expect(body.goals).toBe("sounding more natural");
     expect(body.consentGivenAt).not.toBeNull();
+  });
+
+  it("warms up the pronunciation service", async () => {
+    const app = buildApp();
+
+    await app.inject({
+      method: "GET",
+      url: "/api/onboarding",
+      headers: { authorization: "Bearer test-user-123" },
+    });
+
+    expect(warmUp).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not warm up the pronunciation service when unauthenticated", async () => {
+    const app = buildApp();
+
+    await app.inject({ method: "GET", url: "/api/onboarding" });
+
+    expect(warmUp).not.toHaveBeenCalled();
   });
 });
 

@@ -1,14 +1,11 @@
 # apps/pronunciation-service
 
-Modal-hosted pronunciation-scoring service, using `huper29/huper_recognizer` and
+Modal-hosted pronunciation-scoring service, using `facebook/wav2vec2-xlsr-53-espeak-cv-ft` and
 Goodness-of-Pronunciation scoring. See
 `docs/superpowers/specs/2026-09-05-pronunciation-service-modal-design.md` (original service
-scaffolding) and `docs/superpowers/specs/2026-09-08-gop-pronunciation-scoring-design.md` (the
-current scoring approach) for the design.
-
-Since 2026-09-08, every scored turn is also scored against
-`facebook/wav2vec2-xlsr-53-espeak-cv-ft` for comparison — logged only, never served to the app. See
-`docs/superpowers/specs/2026-09-08-wav2vec2-xlsr53-comparison-scoring-design.md` for why.
+scaffolding), `docs/superpowers/specs/2026-09-08-gop-pronunciation-scoring-design.md` (the scoring
+approach), and `docs/superpowers/specs/2026-09-10-wav2vec2-cutover-design.md` (why this is the
+served recognizer instead of `huper29/huper_recognizer`) for the design.
 
 ## Local development
 

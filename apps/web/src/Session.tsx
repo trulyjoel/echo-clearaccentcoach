@@ -286,6 +286,22 @@ async function finishReplyAudioStream(session: ReplyAudioSession): Promise<void>
   if (session.mediaSource.readyState === "open") session.mediaSource.endOfStream();
 }
 
+/**
+ * A fresh `MediaRecorder` always emits a full WebM container header (EBML + Segment + Tracks) on
+ * its first chunk — restarting one for every turn (see the `end_of_turn` handler below) is what
+ * lets the server treat each turn's accumulated chunks as an already-complete, playable clip
+ * instead of needing to splice a cached header onto later, headerless fragments.
+ */
+function startRecorder(stream: MediaStream, ws: WebSocket): MediaRecorder {
+  const recorder = new MediaRecorder(stream, { mimeType: "audio/webm;codecs=opus" });
+  recorder.ondataavailable = (event) => {
+    if (event.data.size > 0 && ws.readyState === WebSocket.OPEN) ws.send(event.data);
+  };
+  // Deepgram's Flux docs recommend ~80ms chunks for optimal turn-detection latency.
+  recorder.start(80);
+  return recorder;
+}
+
 export function Session() {
   const { getToken } = useAuth();
   const [state, setState] = useState<SessionState>({ status: "idle" });
@@ -322,12 +338,19 @@ export function Session() {
             return { ...prev, turns: applyTranscript(prev.turns, message.text, message.isFinal) };
           });
           return;
-        case "end_of_turn":
+        case "end_of_turn": {
+          const stream = streamRef.current;
+          const ws = wsRef.current;
+          if (stream && ws) {
+            recorderRef.current?.stop();
+            recorderRef.current = startRecorder(stream, ws);
+          }
           setState((prev) => {
             if (prev.status !== "active") return prev;
             return { ...prev, turns: endTurn(prev.turns) };
           });
           return;
+        }
         case "turn_errors":
           setState((prev) => {
             if (prev.status !== "active" && prev.status !== "ended") return prev;
@@ -435,13 +458,7 @@ export function Session() {
       wsRef.current = ws;
 
       ws.onopen = () => {
-        const recorder = new MediaRecorder(stream, { mimeType: "audio/webm;codecs=opus" });
-        recorderRef.current = recorder;
-        recorder.ondataavailable = (event) => {
-          if (event.data.size > 0 && ws.readyState === WebSocket.OPEN) ws.send(event.data);
-        };
-        // Deepgram's Flux docs recommend ~80ms chunks for optimal turn-detection latency.
-        recorder.start(80);
+        recorderRef.current = startRecorder(stream, ws);
       };
 
       ws.onmessage = (event) => {

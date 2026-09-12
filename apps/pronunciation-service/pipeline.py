@@ -31,8 +31,7 @@ GOP_MISPRONUNCIATION_THRESHOLD = -3.0
 
 class Recognizer(Protocol):
     """What score_pronunciation needs from a phone-recognition model — satisfied structurally by
-    models.py's HuperRecognizer and Wav2Vec2XlsrRecognizer, with no inheritance relationship
-    required."""
+    models.py's Wav2Vec2XlsrRecognizer, with no inheritance relationship required."""
 
     label2id: dict[str, int]
     id2label: dict[int, str]

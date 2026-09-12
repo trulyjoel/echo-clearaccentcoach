@@ -286,11 +286,13 @@ const llmTestState = vi.hoisted(() => {
 const pronunciationTestState = vi.hoisted(() => {
   let scoreImpl: (audio: Buffer) => Promise<PronunciationEditOp[]> = async () => [];
   const scoreCalls: Buffer[] = [];
+  const warmUp = vi.fn();
 
   return {
     reset: (): void => {
       scoreImpl = async () => [];
       scoreCalls.length = 0;
+      warmUp.mockClear();
     },
     setScoreImpl: (fn: (audio: Buffer) => Promise<PronunciationEditOp[]>): void => {
       scoreImpl = fn;
@@ -302,11 +304,13 @@ const pronunciationTestState = vi.hoisted(() => {
         return scoreImpl(audio);
       },
     })),
+    warmUpPronunciationService: warmUp,
   };
 });
 
 vi.mock("../pronunciation.js", () => ({
   getPronunciationProvider: pronunciationTestState.getPronunciationProvider,
+  warmUpPronunciationService: pronunciationTestState.warmUpPronunciationService,
 }));
 
 const greetingTestState = vi.hoisted(() => {
@@ -580,6 +584,19 @@ describe("GET /api/session", () => {
       .from(sessions)
       .where(eq(sessions.clerkUserId, "test-user-session-456"));
     expect(row?.endedAt).toBeNull();
+
+    ws.terminate();
+    await app.close();
+  });
+
+  it("warms up the pronunciation service as soon as the connection opens", async () => {
+    await giveConsent();
+    const app = buildApp();
+    await app.ready();
+
+    const { ws } = await connectAndGreet(app, "/api/session", AUTH_HEADERS);
+
+    expect(pronunciationTestState.warmUpPronunciationService).toHaveBeenCalledTimes(1);
 
     ws.terminate();
     await app.close();
@@ -1518,8 +1535,8 @@ describe("pronunciation correction pipeline", () => {
             id: expect.any(String),
             word: "very",
             op: "sub",
-            expectedPhoneme: "V",
-            spokenPhoneme: "B",
+            expectedPhoneme: "v",
+            spokenPhoneme: "b",
             source: "transcript_revision",
           },
         ],
@@ -1599,8 +1616,8 @@ describe("pronunciation correction pipeline", () => {
           id: expect.any(String),
           word: "very",
           op: "sub",
-          expectedPhoneme: "V",
-          spokenPhoneme: "B",
+          expectedPhoneme: "v",
+          spokenPhoneme: "b",
           source: "transcript_revision",
         },
       ],
@@ -1614,8 +1631,8 @@ describe("pronunciation correction pipeline", () => {
         {
           word: "very",
           op: "sub",
-          expectedPhoneme: "V",
-          spokenPhoneme: "B",
+          expectedPhoneme: "v",
+          spokenPhoneme: "b",
           source: "transcript_revision",
         },
       ],
@@ -1685,8 +1702,8 @@ describe("pronunciation correction pipeline", () => {
         {
           word: "very",
           op: "sub",
-          expectedPhoneme: "V",
-          spokenPhoneme: "B",
+          expectedPhoneme: "v",
+          spokenPhoneme: "b",
           source: "transcript_revision",
         },
       ],
@@ -2079,6 +2096,12 @@ describe("usage metering", () => {
   });
 });
 
+/** A chunk starting with the real WebM/Matroska EBML magic bytes, as a fresh MediaRecorder's first
+ * chunk would — needed once a turn boundary has passed and the server is gating on a real header. */
+function webmHeaderChunk(rest: number[]): Buffer {
+  return Buffer.concat([Buffer.from([0x1a, 0x45, 0xdf, 0xa3]), Buffer.from(rest)]);
+}
+
 describe("audio clip capture + storage", () => {
   const sampleError: DetectedError = {
     category: "subject_verb_agreement",
@@ -2181,24 +2204,29 @@ describe("audio clip capture + storage", () => {
     emitEndOfTurn("first turn");
     for (let i = 0; i < 8; i++) await queue.next();
 
-    ws.send(Buffer.from([2]));
+    // Server is now waiting for the next recorder's real header, so turn 2's chunk must carry it.
+    const turn2 = webmHeaderChunk([2]);
+    ws.send(turn2);
     await new Promise((resolve) => setTimeout(resolve, 20));
     emitEndOfTurn("second turn");
     for (let i = 0; i < 8; i++) await queue.next();
 
-    // The first-ever chunk ([1]) is the clip's WebM container header, so it's carried forward
-    // into every later turn's clip too — turn 2 gets its own chunk ([2]) with that header
-    // prepended, not a bare [2], since a headerless fragment alone isn't independently playable.
+    // The client restarts its MediaRecorder after every end_of_turn, so each turn's chunks are
+    // its own fresh recorder instance's output — turn 2's clip is just its header chunk, not [1, ...].
     const uploads = storageTestState.getUploads();
     expect(uploads).toHaveLength(2);
     expect(uploads[0]?.data).toEqual(Buffer.from([1]));
-    expect(uploads[1]?.data).toEqual(Buffer.from([1, 2]));
+    expect(uploads[1]?.data).toEqual(turn2);
 
     ws.terminate();
     await app.close();
   });
 
-  it("trims excess pre-speech noise before StartOfTurn but keeps a pre-roll window and the container header", async () => {
+  it("drops stray chunks from the old recorder that arrive before the next turn's header", async () => {
+    // Regression test for the race where the old MediaRecorder keeps emitting chunks for the
+    // network round trip between this server resetting the audio buffer and the client actually
+    // processing `end_of_turn` and restarting its recorder. Those stray chunks must not become
+    // the new turn's leading (headerless) bytes — see the corrupt-WebM bug this guards against.
     await giveConsent();
     llmTestState.setAnalyzeImpl(async () => [sampleError]);
     const app = buildApp();
@@ -2211,12 +2239,45 @@ describe("audio clip capture + storage", () => {
     await queue.next(); // session_started
     await drainSpokenLine(queue);
 
-    // Chunk 1 is the session's first-ever chunk (the WebM header). Chunks 2-15 are silence/noise
-    // buffered before Flux judges the user actually started speaking — more than the pre-roll
-    // window (10 chunks) holds, so the oldest of them (2-5) fall out and are dropped. The window's
-    // remaining contents (6-15) are kept as lead-in when StartOfTurn fires, since Flux's own
-    // detection lags slightly behind the user's actual speech onset. The header, having long since
-    // fallen out of that window too, is re-added separately so the stored clip is still playable.
+    ws.send(Buffer.from([1]));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    emitEndOfTurn("first turn");
+    for (let i = 0; i < 8; i++) await queue.next();
+
+    // Stray tail chunk from the OLD (not-yet-stopped) recorder, followed by the new recorder's
+    // real header once the client actually restarts it.
+    ws.send(Buffer.from([99]));
+    const turn2 = webmHeaderChunk([2]);
+    ws.send(turn2);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    emitEndOfTurn("second turn");
+    for (let i = 0; i < 8; i++) await queue.next();
+
+    const uploads = storageTestState.getUploads();
+    expect(uploads).toHaveLength(2);
+    expect(uploads[1]?.data).toEqual(turn2);
+
+    ws.terminate();
+    await app.close();
+  });
+
+  it("keeps every chunk since the previous turn boundary, including pre-speech silence before StartOfTurn", async () => {
+    await giveConsent();
+    llmTestState.setAnalyzeImpl(async () => [sampleError]);
+    const app = buildApp();
+    await app.ready();
+
+    const ws = await app.injectWS("/api/session", {
+      headers: { authorization: "Bearer test-user-session-456" },
+    });
+    const queue = mixedQueue(ws);
+    await queue.next(); // session_started
+    await drainSpokenLine(queue);
+
+    // Chunk 1 is the fresh recorder's WebM header. Chunks 2-15 are silence/noise buffered before
+    // Flux judges the user actually started speaking. None of it gets trimmed: the buffer is
+    // exactly one MediaRecorder instance's contiguous output, so dropping any interior chunk
+    // would break the container.
     for (let value = 1; value <= 15; value++) ws.send(Buffer.from([value]));
     await new Promise((resolve) => setTimeout(resolve, 20));
     emitStartOfTurn();
@@ -2227,7 +2288,9 @@ describe("audio clip capture + storage", () => {
 
     const uploads = storageTestState.getUploads();
     expect(uploads).toHaveLength(1);
-    expect(uploads[0]?.data).toEqual(Buffer.from([1, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]));
+    expect(uploads[0]?.data).toEqual(
+      Buffer.from([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]),
+    );
 
     ws.terminate();
     await app.close();

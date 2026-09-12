@@ -1,5 +1,6 @@
 import { PRONUNCIATION_EDIT_OPS } from "@kalli/types";
 import type { PronunciationEditOpKind } from "@kalli/types";
+import type { FastifyBaseLogger } from "fastify";
 import { z } from "zod";
 import type { CanonicalWord } from "./g2p.js";
 
@@ -72,6 +73,29 @@ class HttpPronunciationProvider implements PronunciationProvider {
     const parsed = scoreTurnResponseSchema.parse(await response.json());
     return parsed.editOps;
   }
+}
+
+/**
+ * Fires a best-effort request at the pronunciation service to trigger its cold start (container
+ * boot + model load onto the GPU) before any turn actually needs scoring. Callers must not await
+ * this for the session's own work to proceed — a slow or failed warm-up shouldn't delay or break
+ * anything; it's pure head start.
+ */
+export function warmUpPronunciationService(log: FastifyBaseLogger): void {
+  log.info("Triggering pronunciation service (Modal container) warm-up");
+  fetch(`${getServiceUrl()}/health`, {
+    headers: { Authorization: `Bearer ${getServiceToken()}` },
+  })
+    .then((response) => {
+      if (!response.ok) {
+        log.warn({ status: response.status }, "Pronunciation service warm-up request failed");
+      } else {
+        log.info("Pronunciation service warm-up request succeeded");
+      }
+    })
+    .catch((error: unknown) => {
+      log.warn(error, "Failed to warm up pronunciation service");
+    });
 }
 
 let provider: PronunciationProvider | undefined;

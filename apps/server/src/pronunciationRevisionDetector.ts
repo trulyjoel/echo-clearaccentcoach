@@ -8,16 +8,16 @@ import { g2p } from "./g2p.js";
  * (e.g. "berry"/"very" for a Spanish speaker's b/v confusion), not unrelated ASR noise.
  * See docs/superpowers/specs/2026-09-05-flux-transcript-revision-detection-design.md.
  */
-export function detectAsrSmoothedDeviations(
+export async function detectAsrSmoothedDeviations(
   finalTranscript: string,
   priorTranscripts: string[],
-): DetectedPronunciationError[] {
-  const finalWords = g2p(finalTranscript);
+): Promise<DetectedPronunciationError[]> {
+  const finalWords = await g2p(finalTranscript);
   const flaggedIndices = new Set<number>();
   const deviations: DetectedPronunciationError[] = [];
 
   for (const prior of priorTranscripts) {
-    const priorWords = g2p(prior);
+    const priorWords = await g2p(prior);
     if (priorWords.length !== finalWords.length) continue;
 
     for (let i = 0; i < finalWords.length; i++) {

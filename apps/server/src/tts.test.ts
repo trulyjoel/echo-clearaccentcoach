@@ -317,6 +317,25 @@ describe("synthesizeInworld", () => {
     expect(model).toBe("inworld-tts-2-flash");
   });
 
+  it("yields the final line's audio even when the stream ends without a trailing newline", async () => {
+    process.env["INWORLD_API_KEY"] = "test-inworld-key";
+    const chunk1 = Buffer.from([1, 2, 3]);
+    const chunk2 = Buffer.from([4, 5]);
+    const line1 = JSON.stringify({ result: { audioContent: chunk1.toString("base64") } });
+    const line2 = JSON.stringify({ result: { audioContent: chunk2.toString("base64") } });
+    // Inworld's real stream doesn't always terminate its last NDJSON record with "\n" — the last
+    // chunk here has no trailing newline, unlike the fully-terminated case above.
+    global.fetch = vi.fn(async () =>
+      ndjsonResponseFromRawChunks([`${line1}\n${line2}`]),
+    ) as unknown as typeof fetch;
+
+    const { audio } = await synthesizeInworld("hi", "Sarah");
+    const received: Uint8Array[] = [];
+    for await (const chunk of audio) received.push(chunk as Uint8Array);
+
+    expect(received).toEqual([chunk1, chunk2]);
+  });
+
   it("uses INWORLD_MODEL when set", async () => {
     process.env["INWORLD_API_KEY"] = "test-key";
     process.env["INWORLD_MODEL"] = "inworld-tts-2";
