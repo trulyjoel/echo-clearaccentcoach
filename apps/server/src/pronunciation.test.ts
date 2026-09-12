@@ -1,6 +1,11 @@
+import type { FastifyBaseLogger } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CanonicalWord } from "./g2p.js";
-import { getPronunciationProvider } from "./pronunciation.js";
+import { getPronunciationProvider, warmUpPronunciationService } from "./pronunciation.js";
+
+function fakeLogger(): FastifyBaseLogger {
+  return { warn: vi.fn() } as unknown as FastifyBaseLogger;
+}
 
 const SAMPLE_PHONES: CanonicalWord[] = [{ word: "like", phones: ["L", "AY", "K"] }];
 
@@ -123,5 +128,63 @@ describe("HttpPronunciationProvider", () => {
     capturedSignal?.dispatchEvent(new Event("abort"));
 
     await expect(promise).rejects.toThrow();
+  });
+});
+
+describe("warmUpPronunciationService", () => {
+  const originalFetch = global.fetch;
+  const originalUrl = process.env["PRONUNCIATION_SERVICE_URL"];
+  const originalToken = process.env["PRONUNCIATION_SERVICE_TOKEN"];
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+    process.env["PRONUNCIATION_SERVICE_URL"] = originalUrl;
+    process.env["PRONUNCIATION_SERVICE_TOKEN"] = originalToken;
+  });
+
+  it("GETs /health with the bearer token, without the caller waiting on it", async () => {
+    process.env["PRONUNCIATION_SERVICE_URL"] = "https://pronunciation.example.test";
+    process.env["PRONUNCIATION_SERVICE_TOKEN"] = "test-token";
+    let capturedUrl: string | undefined;
+    let capturedHeaders: Headers | undefined;
+    global.fetch = vi.fn(async (url: string | URL, init?: RequestInit) => {
+      capturedUrl = String(url);
+      capturedHeaders = new Headers(init?.headers);
+      return jsonResponse({ status: "ok" });
+    }) as unknown as typeof fetch;
+
+    const returned = warmUpPronunciationService(fakeLogger());
+
+    expect(returned).toBeUndefined();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(capturedUrl).toBe("https://pronunciation.example.test/health");
+    expect(capturedHeaders?.get("authorization")).toBe("Bearer test-token");
+  });
+
+  it("logs and swallows a network failure instead of throwing", async () => {
+    process.env["PRONUNCIATION_SERVICE_URL"] = "https://pronunciation.example.test";
+    global.fetch = vi.fn(async () => {
+      throw new Error("connection refused");
+    }) as unknown as typeof fetch;
+    const log = fakeLogger();
+
+    warmUpPronunciationService(log);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(log.warn).toHaveBeenCalledWith(expect.any(Error), "Failed to warm up pronunciation service");
+  });
+
+  it("logs a non-2xx response instead of throwing", async () => {
+    process.env["PRONUNCIATION_SERVICE_URL"] = "https://pronunciation.example.test";
+    global.fetch = vi.fn(async () => new Response("unauthorized", { status: 401 })) as unknown as typeof fetch;
+    const log = fakeLogger();
+
+    warmUpPronunciationService(log);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(log.warn).toHaveBeenCalledWith(
+      { status: 401 },
+      "Pronunciation service warm-up request failed",
+    );
   });
 });

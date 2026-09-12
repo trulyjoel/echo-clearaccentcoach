@@ -27,7 +27,7 @@ import type { OnboardingResult, OnboardingState } from "../onboarding/flow.js";
 import { startOnboarding, submitAnswer, submitConfirmation } from "../onboarding/flow.js";
 import { containsDisallowedContent } from "../outputGuard.js";
 import type { PronunciationEditOp } from "../pronunciation.js";
-import { getPronunciationProvider } from "../pronunciation.js";
+import { getPronunciationProvider, warmUpPronunciationService } from "../pronunciation.js";
 import { detectAsrSmoothedDeviations } from "../pronunciationRevisionDetector.js";
 import { getMaxSessionDurationMs, hasReachedDailySessionCap } from "../sessionLimits.js";
 import { splitSentences } from "../sentenceSplitter.js";
@@ -298,6 +298,10 @@ export function registerSessionRoutes(app: FastifyInstance): void {
       socket.on("message", (message: Buffer, isBinary: boolean) =>
         handleSocketMessage(message, isBinary),
       );
+
+      // Fired here, before any of the profile/DB setup below, to give it the longest possible
+      // head start on the pronunciation service's cold start before the first turn needs it.
+      warmUpPronunciationService(request.log);
 
       // preValidation already confirmed the user is authenticated.
       const userId = getAuthenticatedUserId(request);

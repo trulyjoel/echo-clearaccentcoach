@@ -57,6 +57,15 @@ class PronunciationService:
         # of changing that contract to fit the decorator's default.
         web_app = FastAPI()
 
+        @web_app.get("/health")
+        async def health(authorization: str | None = Header(None)) -> dict[str, str]:
+            # Hitting any endpoint is enough to trigger Modal's cold start (@modal.enter loads the
+            # model before this handler runs), so the server calls this at session start purely to
+            # eat that latency before the first turn needs real scoring.
+            if authorization != f"Bearer {os.environ['PRONUNCIATION_SERVICE_TOKEN']}":
+                raise HTTPException(status_code=401, detail="invalid or missing bearer token")
+            return {"status": "ok"}
+
         @web_app.post("/score")
         async def score(
             audio: UploadFile = File(...),

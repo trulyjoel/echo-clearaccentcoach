@@ -286,11 +286,13 @@ const llmTestState = vi.hoisted(() => {
 const pronunciationTestState = vi.hoisted(() => {
   let scoreImpl: (audio: Buffer) => Promise<PronunciationEditOp[]> = async () => [];
   const scoreCalls: Buffer[] = [];
+  const warmUp = vi.fn();
 
   return {
     reset: (): void => {
       scoreImpl = async () => [];
       scoreCalls.length = 0;
+      warmUp.mockClear();
     },
     setScoreImpl: (fn: (audio: Buffer) => Promise<PronunciationEditOp[]>): void => {
       scoreImpl = fn;
@@ -302,11 +304,13 @@ const pronunciationTestState = vi.hoisted(() => {
         return scoreImpl(audio);
       },
     })),
+    warmUpPronunciationService: warmUp,
   };
 });
 
 vi.mock("../pronunciation.js", () => ({
   getPronunciationProvider: pronunciationTestState.getPronunciationProvider,
+  warmUpPronunciationService: pronunciationTestState.warmUpPronunciationService,
 }));
 
 const greetingTestState = vi.hoisted(() => {
@@ -580,6 +584,19 @@ describe("GET /api/session", () => {
       .from(sessions)
       .where(eq(sessions.clerkUserId, "test-user-session-456"));
     expect(row?.endedAt).toBeNull();
+
+    ws.terminate();
+    await app.close();
+  });
+
+  it("warms up the pronunciation service as soon as the connection opens", async () => {
+    await giveConsent();
+    const app = buildApp();
+    await app.ready();
+
+    const { ws } = await connectAndGreet(app, "/api/session", AUTH_HEADERS);
+
+    expect(pronunciationTestState.warmUpPronunciationService).toHaveBeenCalledTimes(1);
 
     ws.terminate();
     await app.close();
