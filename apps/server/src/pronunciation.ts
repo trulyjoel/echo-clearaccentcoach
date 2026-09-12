@@ -82,12 +82,15 @@ class HttpPronunciationProvider implements PronunciationProvider {
  * anything; it's pure head start.
  */
 export function warmUpPronunciationService(log: FastifyBaseLogger): void {
+  log.info("Triggering pronunciation service (Modal container) warm-up");
   fetch(`${getServiceUrl()}/health`, {
     headers: { Authorization: `Bearer ${getServiceToken()}` },
   })
     .then((response) => {
       if (!response.ok) {
         log.warn({ status: response.status }, "Pronunciation service warm-up request failed");
+      } else {
+        log.info("Pronunciation service warm-up request succeeded");
       }
     })
     .catch((error: unknown) => {

@@ -21,7 +21,12 @@ import { DEEPGRAM_MODEL, openDeepgramConnection } from "../deepgram.js";
 import { createMarkerResolver } from "../emphasisMarkers.js";
 import { g2p } from "../g2p.js";
 import type { ConversationMessage, TokenUsage } from "../llm.js";
-import { buildReplySystemPrompt, getAnalysisModelId, getLLMProvider, pickGreeting } from "../llm.js";
+import {
+  buildReplySystemPrompt,
+  getAnalysisModelId,
+  getLLMProvider,
+  pickGreeting,
+} from "../llm.js";
 import { extractOnboardingAnswer, extractOnboardingConfirmation } from "../onboarding/extract.js";
 import type { OnboardingResult, OnboardingState } from "../onboarding/flow.js";
 import { startOnboarding, submitAnswer, submitConfirmation } from "../onboarding/flow.js";
@@ -145,6 +150,7 @@ async function analyzeTurn(
   log: FastifyBaseLogger,
 ): Promise<TurnAnalysis> {
   const canonicalPhones = await g2p(transcript);
+  log.info({ audioBytes: audio.length, words: canonicalPhones.length }, "Scoring pronunciation");
   const [analysisResult, pronunciationResult] = await Promise.allSettled([
     getLLMProvider().analyzeErrors(transcript, l1),
     getPronunciationProvider().scoreTurn(audio, canonicalPhones),
@@ -158,6 +164,7 @@ async function analyzeTurn(
   let pronunciationErrors: DetectedPronunciationError[] = [];
   if (pronunciationResult.status === "fulfilled") {
     pronunciationErrors = toDetectedPronunciationErrors(pronunciationResult.value);
+    log.info({ editOps: pronunciationErrors.length }, "Pronunciation scoring complete");
   } else {
     log.error(
       { err: pronunciationResult.reason, audioBytes: audio.length },
